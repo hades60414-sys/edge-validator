@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Edge Validator — 策略照妖鏡</title>
+  <meta name="description" content="把你的回測丟進來,它會誠實告訴你這個 edge 是真的,還是你把雜訊擬合成了曲線。純瀏覽器內運算,資料不上傳。">
+  <meta name="color-scheme" content="dark">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2307090c'/%3E%3Cpath d='M4 22 L12 12 L18 18 L28 6' fill='none' stroke='%2338e1c4' stroke-width='2.5'/%3E%3C/svg%3E">
+</head>
+<body>
+
+  <!-- ===================== 頂欄 ===================== -->
+  <header class="topbar">
+    <div class="wrap">
+      <div class="brand">
+        <span class="glyph" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18 L9 10 L13 14 L21 4"/><path d="M3 21 h18"/></svg>
+        </span>
+        <span>EDGE&nbsp;<b>VALIDATOR</b></span>
+      </div>
+      <div class="status">
+        <span class="dot" id="engineDot"></span>
+        <span id="engineStatus">引擎待命</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===================== HERO ===================== -->
+  <section class="hero">
+    <span class="beam" aria-hidden="true"></span>
+    <div class="wrap">
+      <span class="kicker reveal d1">FORENSIC BACKTEST LAB · 客戶端運算</span>
+      <h1 class="reveal d2">你的 edge 是真的,<br>還是把<span class="accent">雜訊</span>擬合成了曲線?</h1>
+      <p class="lede reveal d3">
+        大部分回測平台幫你「找到看起來會賺的策略」。這一台相反——它<strong>假設你的策略是假的</strong>,
+        然後用一整套學界標準的統計檢定,試著反駁你。過得了關的,才可能是真 edge;過不了的,
+        恭喜你在賠真錢之前就知道了。
+      </p>
+      <div class="hero-meta reveal d4">
+        <span class="chip"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="1"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>資料不離開你的瀏覽器</span>
+        <span class="chip"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="4"/></svg>七道誠實統計閘</span>
+        <span class="chip"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>純靜態,零後端上傳</span>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap">
+
+    <!-- ===================== 1. 上傳 ===================== -->
+    <section id="upload">
+      <div class="section-head">
+        <span class="step-no">STEP 01 / 上傳</span>
+        <h2>丟進你的回測報酬</h2>
+        <p>一欄逐期報酬率、或「日期,報酬」兩欄、或多策略矩陣(日期 + 多欄)。支援 UTF-8 / Big5 / cp950 編碼、百分比與千分位符號、淨值曲線(會自動轉報酬)。</p>
+      </div>
+
+      <div class="upload-row">
+        <label class="drop" id="drop">
+          <input type="file" id="fileInput" accept=".csv,.txt,text/csv">
+          <svg class="xicon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M24 32V10M24 10l-7 7M24 10l7 7"/>
+            <path d="M8 30v6a2 2 0 0 0 2 2h28a2 2 0 0 0 2-2v-6"/>
+          </svg>
+          <div class="big">拖放 CSV 到這裡,或點擊選檔</div>
+          <div class="sub">.csv / .txt · 最多幾千列 · 全程在你本機運算</div>
+        </label>
+      </div>
+
+      <div class="file-pill" id="filePill">
+        <span><span id="fileName" class="mono"></span> <span class="meta" id="fileMeta"></span></span>
+        <button class="clear" id="fileClear" type="button">✕ 移除</button>
+      </div>
+
+      <div class="sample-row">
+        <span class="label">沒有資料?載入示範:</span>
+        <button class="btn small ghost" id="sampleGenuine" type="button">▸ 有真 edge 的樣本</button>
+        <button class="btn small ghost" id="sampleOverfit" type="button">▸ 過擬合的樣本</button>
+      </div>
+
+      <!-- ===================== 2. 參數 ===================== -->
+      <div class="section-head" style="margin-top:44px">
+        <span class="step-no">STEP 02 / 校準</span>
+        <h2>設定裁判參數</h2>
+        <p>最關鍵的是「你試了幾種參數」——這決定了通縮夏普(DSR)要扣掉多少運氣成分。誠實填,別自欺。</p>
+      </div>
+
+      <div class="params">
+        <div class="field">
+          <label>你試了幾種參數 / 策略變體?
+            <span class="hint" title="Number of trials。你在挑到這條曲線之前,總共回測過幾組參數?試越多,靠運氣撞到漂亮結果的機率越高,DSR 會據此通縮。誠實填。">?</span>
+          </label>
+          <input type="number" id="nTrials" min="1" step="1" value="1">
+          <div class="trials-scale"><span>1 = 沒調參</span><span>50+ = 大量掃描</span></div>
+        </div>
+
+        <div class="field">
+          <label>每年期數
+            <span class="hint" title="Periods per year。日資料≈252、週資料≈52、月資料≈12、加密全年無休≈365。留空且有日期欄時會自動推算。">?</span>
+          </label>
+          <select id="ppy">
+            <option value="">自動(從日期推算)</option>
+            <option value="252">日(股票 ≈ 252)</option>
+            <option value="365">日(加密 = 365)</option>
+            <option value="52">週 = 52</option>
+            <option value="12">月 = 12</option>
+            <option value="4">季 = 4</option>
+          </select>
+          <div class="sub">無日期欄時,預設 252。</div>
+        </div>
+
+        <div class="field">
+          <label>對照基準
+            <span class="hint" title="拿一條被動基準跟你的策略比。基準會依你資料的日期對齊;日期不重疊時退化成長度對齊並提示。">?</span>
+          </label>
+          <select id="benchSel">
+            <option value="">不比較</option>
+          </select>
+          <div class="sub" id="benchDesc">選一條看你有沒有贏過無腦買進持有。</div>
+        </div>
+      </div>
+
+      <!-- ===================== 3. 照妖 ===================== -->
+      <button class="btn-scan" id="runBtn" type="button" disabled>
+        <svg class="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.5" opacity=".9"/></svg>
+        <svg class="ray" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/><circle cx="12" cy="12" r="3.2"/></svg>
+        <span class="txt">照妖 · 開始統計檢定</span>
+      </button>
+
+      <!-- Pyodide 載入條 -->
+      <div class="loader" id="loader">
+        <div class="msg"><span class="dot warm"></span><span id="loaderMsg">正在載入裁判引擎(Pyodide + NumPy/Pandas,約 10–15MB)…</span></div>
+        <div class="bar indeterminate" id="loaderBar"><span id="loaderFill"></span></div>
+      </div>
+
+      <!-- 錯誤條 -->
+      <div class="errbox" id="errbox"></div>
+    </section>
+
+    <!-- ===================== 判決書 ===================== -->
+    <section id="results" aria-live="polite">
+      <div class="section-head">
+        <span class="step-no">VERDICT / 判決書</span>
+        <h2>照妖鏡的裁決</h2>
+      </div>
+
+      <!-- 主判決卡 -->
+      <div class="verdict-card" id="verdictCard" data-verdict="inconclusive">
+        <div class="verdict-top">
+          <div class="verdict-main">
+            <div class="verdict-label">綜合判定</div>
+            <div class="verdict-headline" id="verdictHeadline">
+              <span class="stamp" id="verdictStamp"></span>
+              <span id="verdictText">—</span>
+            </div>
+            <p class="verdict-sub" id="verdictSub"></p>
+          </div>
+          <div class="score-pane">
+            <div class="score-cap">誠實分數 / 100</div>
+            <div class="score-num"><span id="scoreNum">0</span><small>/100</small></div>
+            <div class="gauge"><div class="fill" id="gaugeFill"></div><div class="ticks"><i></i><i></i><i></i><i></i><i></i></div></div>
+            <div class="gauge-scale"><span>過擬合</span><span>不明</span><span>可能真實</span></div>
+          </div>
+        </div>
+
+        <div class="verdict-body">
+          <div class="reasons-grid" id="reasonsGrid">
+            <div class="reasons">
+              <h4><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>裁判怎麼看(人話)</h4>
+              <ul id="reasonsList"></ul>
+            </div>
+            <div class="flags" id="flagsBox">
+              <h4><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>紅旗</h4>
+              <ul id="flagsList"></ul>
+            </div>
+          </div>
+          <div class="warnings hidden" id="warningsBox"></div>
+        </div>
+      </div>
+
+      <!-- 指標網格 -->
+      <div class="section-head" style="margin-top:40px">
+        <span class="step-no">METRICS / 績效指標</span>
+        <h2>風險調整後績效</h2>
+      </div>
+      <div class="metrics-grid" id="metricsGrid"></div>
+
+      <!-- 檢定閘卡 -->
+      <div class="section-head" style="margin-top:40px">
+        <span class="step-no">GATES / 統計檢定</span>
+        <h2>七道誠實閘的細節</h2>
+      </div>
+      <div class="gates" id="gatesGrid"></div>
+
+      <!-- 圖表 -->
+      <div class="section-head" style="margin-top:40px">
+        <span class="step-no">SCOPE / 視覺化</span>
+        <h2>看得見的證據</h2>
+      </div>
+      <div class="charts">
+        <div class="chart-card">
+          <h4>淨值曲線 vs 對照基準</h4>
+          <p class="cap">從 1.0 起算的資金曲線。基準對齊到你資料的期數。</p>
+          <div id="equityChart"></div>
+          <div class="legend" id="equityLegend"></div>
+        </div>
+        <div class="chart-card">
+          <h4>隨機重排虛無分布</h4>
+          <p class="cap">把漂移抹掉、只保留波動,block-bootstrap 出的「靠運氣能刷到的年化夏普」。你的真實夏普要站在右邊才算贏過隨機。</p>
+          <div id="nullChart"></div>
+          <div class="legend" id="nullLegend"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== 方法論 ===================== -->
+    <section id="method">
+      <div class="section-head">
+        <span class="step-no">METHODOLOGY / 方法論</span>
+        <h2>七道閘,各擋什麼騙局</h2>
+        <p>這套裁判制度萃取自一座量化策略農場(4,800+ 次試驗、0 個通過誠實樣本外驗證)。它的存在就是為了在你把錢放進過擬合的回測前攔下你。</p>
+      </div>
+      <div class="method">
+        <div class="cell"><span class="n">01 · DSR</span><h5>通縮夏普</h5><p>扣掉「你試了幾種參數才挑到這條曲線」的運氣成分。試越多,門檻越高。</p></div>
+        <div class="cell"><span class="n">02 · CSCV</span><h5>回測過配機率 PBO</h5><p>樣本內選到的最佳者,樣本外還站得住嗎?墊底的機率就是過擬合機率(僅矩陣模式)。</p></div>
+        <div class="cell"><span class="n">03 · SPA</span><h5>Hansen 優越性檢定</h5><p>資料挖掘後,你的策略真的贏過基準嗎?控制家族誤差(僅矩陣模式)。</p></div>
+        <div class="cell"><span class="n">04 · StepM</span><h5>Romano–Wolf 篩選</h5><p>多重比較修正後,還能倖存的候選有幾個(僅矩陣模式)。</p></div>
+        <div class="cell"><span class="n">05 · COST</span><h5>成本壓力測試</h5><p>手續費/滑價 ×1 / ×3 / ×6 後,夏普還正嗎?edge 常被摩擦吃光(需提供換手率)。</p></div>
+        <div class="cell"><span class="n">06 · NULL</span><h5>隨機重排檢定</h5><p>抹掉漂移、保留波動,重排上千次。你贏得過隨機打亂的版本嗎?</p></div>
+        <div class="cell"><span class="n">07 · BENCH</span><h5>對照基準</h5><p>vs 0050 定期定額 / 農場的誠實 beta 策略。相對無腦買進持有,你有加值嗎?</p></div>
+        <div class="cell" style="background:var(--bg-2)"><span class="n">＝</span><h5>綜合判決</h5><p>三態:<b style="color:var(--real)">可能真實</b> / <b style="color:var(--incon)">結論不明</b> / <b style="color:var(--overfit)">疑似過擬合</b>。過關≠會賺。</p></div>
+      </div>
+    </section>
+
+    <!-- ===================== 免責 ===================== -->
+    <section id="disclaimer" style="padding-top:20px">
+      <div class="disclaimer">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 9v4M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg>免責聲明 · 請務必讀完</h4>
+        <ul>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 6 9 17l-5-5"/></svg><span><b>這不是投資建議。</b>它是統計工具,不推薦任何策略、不叫你買賣。對照組的農場策略是「誠實的 beta 參考基準」,不是 alpha、不是推銷。</span></li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 6 9 17l-5-5"/></svg><span><b>統計通過是必要非充分條件。</b>過了這些閘不代表會賺,只代表「沒發現明顯的過度擬合/挖掘偏誤」。真金白銀前請務必做前向(walk-forward)驗證與小額實測。</span></li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 6 9 17l-5-5"/></svg><span><b>你的資料不離開瀏覽器。</b>所有計算用 Pyodide(瀏覽器內的 Python)在你本機跑,CSV 不上傳任何伺服器。關掉分頁,一切歸零。</span></li>
+        </ul>
+      </div>
+    </section>
+
+  </div>
+
+  <footer>
+    <div class="wrap">
+      <div class="fbrand">EDGE&nbsp;<b>VALIDATOR</b> · 策略照妖鏡</div>
+      <div class="fnote">裁判引擎萃取自 auto-quant-btc 農場的「不被自己騙」制度,經多代理對抗審查。純靜態站,部署於 GitHub Pages。© 2026</div>
+    </div>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,610 @@
+"""judge_web — Edge Validator 的統一裁判引擎(純 numpy/pandas,Pyodide-ready)。
+
+把 auto-quant-btc FARM 農場的「不被自己騙」制度萃取成一顆瀏覽器內可跑的引擎:
+- DSR(Deflated Sharpe Ratio)         ← farm/judge.py,scipy 換成 statshim
+- Romano-Wolf StepM / Hansen SPA / PBO ← farm/fwer_gates.py,幾乎原封(本就純 numpy)
+- Sharpe/Sortino/Calmar/MDD/集中度      ← backtest/metrics.py
+- round-trip bps 成本壓力               ← farm/factor_harvest_mvp.py 的 CostModel 精神
+- permutation / block-bootstrap null    ← 本檔新寫(單報酬序列 vs null p95)
+
+唯一入口 `analyze(payload: dict) -> dict`,契約見 README / 前端依賴。純函數,不碰檔案/網路。
+
+裁判哲學(誠實、保守):過關只代表「沒明顯過擬合」,不代表會賺。reasons 用人話講清楚。
+"""
+from itertools import combinations
+
+import numpy as np
+import pandas as pd
+
+from . import statshim as ss
+
+EULER_GAMMA = 0.5772156649015329
+_SE_FLOOR = 1e-12
+
+
+# ===========================================================================
+# 1. 績效指標(移植 backtest/metrics.py,改吃 periods_per_year 純數字)
+# ===========================================================================
+def _equity_from_returns(r: np.ndarray, start=1.0) -> np.ndarray:
+    return np.cumprod(1.0 + np.nan_to_num(r, nan=0.0)) * start
+
+
+def _max_drawdown(equity: np.ndarray) -> float:
+    if equity.size == 0:
+        return 0.0
+    roll_max = np.maximum.accumulate(equity)
+    dd = equity / roll_max - 1.0
+    return float(dd.min())
+
+
+def compute_metrics(returns, periods_per_year: float) -> dict:
+    """一包風險調整後指標。returns=每期報酬率(已扣成本)。periods_per_year=252/52/12/365..."""
+    r = np.nan_to_num(np.asarray(returns, dtype=float), nan=0.0)
+    n = int(r.size)
+    apy = float(periods_per_year) if periods_per_year else 252.0
+    eq = _equity_from_returns(r)
+    final_equity = float(eq[-1]) if n else 1.0
+    total_return = final_equity - 1.0 if n else 0.0
+    years = n / apy if apy else 0.0
+    cagr = (final_equity ** (1.0 / years) - 1.0) if years > 0 and final_equity > 0 else float("nan")
+
+    mean = r.mean() * apy if n else 0.0
+    vol = r.std(ddof=0) * np.sqrt(apy) if n else 0.0
+    sharpe = float(mean / vol) if vol > 0 else float("nan")
+
+    neg = r[r < 0]
+    downside = neg.std(ddof=0) * np.sqrt(apy) if neg.size else 0.0
+    sortino = float(mean / downside) if downside > 0 else float("nan")
+
+    mdd = _max_drawdown(eq)
+    calmar = float(cagr / abs(mdd)) if mdd < 0 and np.isfinite(cagr) else float("nan")
+
+    pos_sum = r[r > 0].sum()
+    top_conc = float(r.max() / pos_sum) if pos_sum > 0 else float("nan")
+
+    return {
+        "sharpe": sharpe, "sortino": sortino, "cagr": cagr, "ann_vol": float(vol),
+        "max_drawdown": mdd, "calmar": calmar, "n_periods": n,
+        "top_bar_concentration": top_conc, "final_equity": final_equity,
+        "total_return": float(total_return),
+    }
+
+
+def _sharpe_periodic(r: np.ndarray) -> float:
+    """每期(非年化)Sharpe,DSR / permutation 用。"""
+    if r.size == 0:
+        return 0.0
+    std = r.std(ddof=0)
+    return float(r.mean() / std) if std > 0 else 0.0
+
+
+# ===========================================================================
+# 2. Deflated Sharpe Ratio(移植 farm/judge.py,scipy→statshim)
+# ===========================================================================
+def expected_max_sharpe(sr_variance: float, n_trials: int) -> float:
+    """n_trials 條零技術策略中,最佳者 Sharpe 的期望值(每期尺度)。"""
+    if n_trials < 2:
+        return 0.0
+    sd = float(np.sqrt(max(sr_variance, 0.0)))
+    z1 = ss.norm_ppf(1.0 - 1.0 / n_trials)
+    z2 = ss.norm_ppf(1.0 - 1.0 / (n_trials * np.e))
+    return sd * ((1.0 - EULER_GAMMA) * z1 + EULER_GAMMA * z2)
+
+
+def probabilistic_sharpe(sr_hat: float, sr_benchmark: float, n_obs: int,
+                         skew: float, kurt: float) -> float:
+    """PSR:給定非常態報酬,P(真 SR > sr_benchmark)。kurt 為非超額(normal=3)。"""
+    denom = np.sqrt(1.0 - skew * sr_hat + (kurt - 1.0) / 4.0 * sr_hat ** 2)
+    if not np.isfinite(denom) or denom == 0:
+        return float("nan")
+    z = (sr_hat - sr_benchmark) * np.sqrt(max(n_obs - 1, 1)) / denom
+    return float(ss.norm_cdf(z))
+
+
+def deflated_sharpe(returns: np.ndarray, n_trials: int,
+                    trial_sharpes: np.ndarray) -> dict:
+    """單條策略每期報酬的 DSR。trial_sharpes=試過各參數的每期 Sharpe 池(matrix 模式才有真池;
+    returns 模式退化成 n_trials 驅動的通縮)。回傳每期尺度 sr / sr0 / dsr_prob / p_value。"""
+    r = np.asarray(returns, dtype=float)
+    r = r[np.isfinite(r)]
+    std = r.std(ddof=1) if r.size > 1 else 0.0
+    sr = float(r.mean() / std) if std > 0 else 0.0
+    pool = np.asarray(trial_sharpes, dtype=float)
+    pool = pool[np.isfinite(pool)]
+    sr_variance = float(np.var(pool, ddof=1)) if pool.size > 1 else 0.0
+    sr0 = expected_max_sharpe(sr_variance, n_trials)
+    dsr = probabilistic_sharpe(
+        sr_hat=sr, sr_benchmark=sr0, n_obs=r.size,
+        skew=ss.skew(r) if r.size > 2 else 0.0,
+        kurt=ss.kurtosis(r, fisher=False) if r.size > 2 else 3.0,
+    )
+    return {"sr_daily": sr, "sr0_daily": sr0, "dsr": dsr,
+            "p_value": (1.0 - dsr) if np.isfinite(dsr) else float("nan"),
+            "n_trials": int(n_trials)}
+
+
+# ===========================================================================
+# 3. FWER 層:circular block bootstrap 底座 + SPA + Romano-Wolf + PBO
+#    (移植 farm/fwer_gates.py,本就純 numpy)
+# ===========================================================================
+def _circular_block_bootstrap_means(diffs: np.ndarray, n_boot: int, block_len: int,
+                                    rng: np.random.Generator) -> np.ndarray:
+    T, K = diffs.shape
+    L = int(max(1, min(block_len, T)))
+    m = int(np.ceil(T / L))
+    rem = T - (m - 1) * L
+    ext = np.concatenate([diffs, diffs[:L - 1]], axis=0) if L > 1 else diffs
+    c = np.concatenate([np.zeros((1, K)), np.cumsum(ext, axis=0)], axis=0)
+    sum_l = c[L:L + T] - c[:T]
+    sum_rem = c[rem:rem + T] - c[:T]
+    means = np.empty((n_boot, K), dtype=float)
+    chunk = max(1, int(4e7 // max(1, m * K)))
+    for lo in range(0, n_boot, chunk):
+        hi = min(n_boot, lo + chunk)
+        starts = rng.integers(0, T, size=(hi - lo, m))
+        s = sum_l[starts[:, :m - 1]].sum(axis=1) if m > 1 else 0.0
+        means[lo:hi] = (s + sum_rem[starts[:, m - 1]]) / T
+    return means
+
+
+def _spa_pvalues(dbar: np.ndarray, boot_means: np.ndarray, se: np.ndarray, T: int) -> dict:
+    t_stat = dbar / se
+    t_obs = float(max(0.0, t_stat.max()))
+    loglog = float(np.sqrt(2.0 * np.log(np.log(T)))) if T > 15 else 0.0
+    mu_c = np.where(dbar <= -se * loglog, dbar, 0.0)
+    centered = boot_means - dbar
+    b = boot_means.shape[0]
+    out = {}
+    for key, mu in (("p_lower", np.minimum(dbar, 0.0)),
+                    ("p_value", mu_c),
+                    ("p_upper", np.zeros_like(dbar))):
+        tb = np.maximum(((centered + mu) / se).max(axis=1), 0.0)
+        out[key] = float((1 + int(np.sum(tb >= t_obs))) / (b + 1))
+    out["t_max"] = t_obs
+    return out
+
+
+def _romano_wolf_adj_p(dbar: np.ndarray, boot_means: np.ndarray, se: np.ndarray) -> np.ndarray:
+    K = dbar.shape[0]
+    t_stat = dbar / se
+    tb = (boot_means - dbar) / se
+    order = np.argsort(-t_stat)
+    suffix_max = np.maximum.accumulate(tb[:, order][:, ::-1], axis=1)[:, ::-1]
+    b = tb.shape[0]
+    p_adj = np.empty(K, dtype=float)
+    prev = 0.0
+    for j in range(K):
+        p_j = (1 + int(np.sum(suffix_max[:, j] >= t_stat[order[j]]))) / (b + 1)
+        prev = max(prev, p_j)
+        p_adj[order[j]] = prev
+    return p_adj
+
+
+def _block_moments(values: np.ndarray, n_blocks: int):
+    t = values.shape[0]
+    bounds = np.linspace(0, t, n_blocks + 1, dtype=int)
+    sums = np.array([values[bounds[i]:bounds[i + 1]].sum(axis=0) for i in range(n_blocks)])
+    sumsqs = np.array([(values[bounds[i]:bounds[i + 1]] ** 2).sum(axis=0) for i in range(n_blocks)])
+    counts = np.array([[bounds[i + 1] - bounds[i]] * values.shape[1] for i in range(n_blocks)],
+                      dtype=float)
+    return sums, sumsqs, counts
+
+
+def _sharpe_from_moments(s, ss_, n):
+    mean = s / n
+    var = ss_ / n - mean ** 2
+    sd = np.sqrt(np.clip(var, 1e-18, None))
+    return mean / sd
+
+
+def pbo_cscv(values: np.ndarray, n_blocks: int = 12) -> dict:
+    """整批策略的 PBO。values=(T,K) 報酬矩陣。回傳 pbo(0~1,越低越好)。"""
+    if values.shape[1] < 2:
+        return {"pbo": float("nan"), "n_combinations": 0, "n_strategies": int(values.shape[1])}
+    if n_blocks % 2 != 0:
+        n_blocks -= 1
+    while n_blocks > 2 and values.shape[0] < n_blocks * 4:
+        n_blocks -= 2
+    if n_blocks < 2:
+        return {"pbo": float("nan"), "n_combinations": 0, "n_strategies": int(values.shape[1])}
+    n_strategies = values.shape[1]
+    sums, sumsqs, counts = _block_moments(values, n_blocks)
+    is_idx = np.array(list(combinations(range(n_blocks), n_blocks // 2)))
+    mask = np.zeros((len(is_idx), n_blocks), dtype=bool)
+    mask[np.arange(len(is_idx))[:, None], is_idx] = True
+    oos_idx = np.nonzero(~mask)[1].reshape(len(is_idx), n_blocks // 2)
+    sr_is = _sharpe_from_moments(
+        np.add.reduce(sums[is_idx], axis=1),
+        np.add.reduce(sumsqs[is_idx], axis=1),
+        np.add.reduce(counts[is_idx], axis=1))
+    sr_oos = _sharpe_from_moments(
+        np.add.reduce(sums[oos_idx], axis=1),
+        np.add.reduce(sumsqs[oos_idx], axis=1),
+        np.add.reduce(counts[oos_idx], axis=1))
+    best = np.argmax(sr_is, axis=1)
+    best_oos = sr_oos[np.arange(len(is_idx)), best]
+    omega = (sr_oos <= best_oos[:, None]).sum(axis=1) / (n_strategies + 1)
+    omega = np.clip(omega, 1e-9, 1 - 1e-9)
+    logits = np.log(omega / (1 - omega))
+    return {"pbo": float(np.mean(logits < 0)), "n_combinations": int(len(logits)),
+            "n_strategies": n_strategies, "n_blocks": n_blocks}
+
+
+def run_fwer_gates(matrix_values: np.ndarray, names: list, bench: np.ndarray,
+                   alpha=0.10, n_bootstrap=1000, block_len=10, seed=20260707,
+                   min_obs=100, n_blocks_pbo=12) -> dict:
+    """對一批候選跑 Romano-Wolf(逐候選)+ SPA + PBO(套件級)。matrix_values=(T,K),
+    bench=(T,) 同期基準報酬。缺基準時傳 0 序列(=絕對報酬 vs 0)。"""
+    K = matrix_values.shape[1]
+    base = {"computed": False, "alpha": alpha, "n_candidates": K,
+            "per_candidate": {}, "n_rejected": 0,
+            "spa": {"p_value": float("nan"), "p_lower": float("nan"),
+                    "p_upper": float("nan"), "t_max": float("nan"), "best": None},
+            "pbo": {"pbo": float("nan"), "n_combinations": 0, "n_strategies": K}}
+    T = matrix_values.shape[0]
+    if K < 1 or T < min_obs:
+        base["reason"] = f"對齊後樣本 {T} < min_obs {min_obs}" if K >= 1 else "無候選"
+        base["n_obs"] = int(T)
+        return base
+
+    diffs = matrix_values - bench[:, None]
+    rng = np.random.default_rng(seed)
+    boot_means = _circular_block_bootstrap_means(diffs, n_bootstrap, block_len, rng)
+    dbar = diffs.mean(axis=0)
+    se = np.maximum(boot_means.std(axis=0, ddof=1), _SE_FLOOR)
+
+    spa = _spa_pvalues(dbar, boot_means, se, T)
+    spa["best"] = names[int(np.argmax(dbar / se))]
+    p_adj = _romano_wolf_adj_p(dbar, boot_means, se)
+    reject = p_adj <= alpha
+    t_stat = dbar / se
+    per = {names[k]: {"pass": bool(reject[k]), "rw_p_adj": float(p_adj[k]),
+                      "t_stat": float(t_stat[k]), "mean_excess_daily": float(dbar[k])}
+           for k in range(K)}
+    base.update({"computed": True, "reason": "", "n_obs": int(T), "spa": spa,
+                 "pbo": pbo_cscv(matrix_values, n_blocks_pbo),
+                 "per_candidate": per, "n_rejected": int(reject.sum())})
+    return base
+
+
+# ===========================================================================
+# 4. permutation / block-bootstrap null(本檔新寫,單一報酬序列)
+# ===========================================================================
+def permutation_null(returns: np.ndarray, periods_per_year: float,
+                     n_perm=2000, block_len=None, seed=20260708) -> dict:
+    """對【單一報酬序列】建虛無分布(H0=沒有 edge)並檢定。
+
+    做法:把序列先「去均值」(demean)——保留波動度、偏度、峰度等分布形狀,但抹掉漂移
+    (drift),然後 circular block-bootstrap N 次,得到「若真實漂移為零、只剩觀察到的波動」
+    這個虛無世界下,靠運氣能刷出多高的年化 Sharpe。再看真實 Sharpe 是否顯著勝過它。
+
+    - block_len=None 時自動取 max(1, round(sqrt(T)))(保守吃掉短程自相關)。
+    - null_p95_sharpe = 虛無分布 95 百分位(單邊 5% 門檻)。
+    - p_value = 虛無分布中 >= 真 Sharpe 的比例(加一平滑),越低越像真 edge。
+    - passes = 真 Sharpe > null p95。
+    語意:這是「你的正報酬有沒有可能只是零漂移＋這種波動的隨機產物」的直接檢定。
+    """
+    r = np.nan_to_num(np.asarray(returns, dtype=float), nan=0.0)
+    T = r.size
+    apy = float(periods_per_year) if periods_per_year else 252.0
+    if T < 8:
+        return {"real_sharpe": float("nan"), "null_p95_sharpe": float("nan"),
+                "p_value": float("nan"), "passes": False, "n_perm": 0}
+    real_sr = _sharpe_periodic(r) * np.sqrt(apy)
+    dm = r - r.mean()                        # H0:抹掉漂移,保留波動/形狀
+    L = int(block_len) if block_len else int(max(1, round(np.sqrt(T))))
+    L = max(1, min(L, T))
+    m = int(np.ceil(T / L))
+    ext = np.concatenate([dm, dm[:L - 1]]) if L > 1 else dm
+    c = np.concatenate([[0.0], np.cumsum(ext)])
+    csq = np.concatenate([[0.0], np.cumsum(ext ** 2)])
+    sum_l = c[L:L + T] - c[:T]
+    sumsq_l = csq[L:L + T] - csq[:T]
+    rng = np.random.default_rng(seed)
+    null = np.empty(n_perm, dtype=float)
+    for i in range(n_perm):
+        starts = rng.integers(0, T, size=m)
+        tot = float(sum_l[starts].sum())
+        totsq = float(sumsq_l[starts].sum())
+        nn = m * L
+        mean = tot / nn
+        var = totsq / nn - mean ** 2
+        sd = np.sqrt(var) if var > 0 else 0.0
+        null[i] = (mean / sd) * np.sqrt(apy) if sd > 0 else 0.0
+    p95 = float(np.percentile(null, 95))
+    p_value = float((1 + int(np.sum(null >= real_sr))) / (n_perm + 1))
+    return {"real_sharpe": float(real_sr), "null_p95_sharpe": p95,
+            "p_value": p_value, "passes": bool(real_sr > p95), "n_perm": int(n_perm)}
+
+
+# ===========================================================================
+# 5. 成本壓力(round-trip bps,精神取 factor_harvest_mvp.CostModel)
+# ===========================================================================
+def cost_stress(returns: np.ndarray, turnover: np.ndarray, cost_bps: float,
+                periods_per_year: float) -> dict:
+    """每期扣 turnover_t × (cost_bps/1e4) × mult,看 ×1/×3/×6 後年化 Sharpe。
+    cost_bps 為「每 1.0 單位換手的 round-trip 成本(bps)」。"""
+    r = np.nan_to_num(np.asarray(returns, dtype=float), nan=0.0)
+    tn = np.nan_to_num(np.asarray(turnover, dtype=float), nan=0.0)
+    apy = float(periods_per_year) if periods_per_year else 252.0
+    n = min(r.size, tn.size)
+    r, tn = r[:n], tn[:n]
+    base_cost = tn * (cost_bps / 1e4)
+    out = {}
+    for mult, key in ((1.0, "x1_sharpe"), (3.0, "x3_sharpe"), (6.0, "x6_sharpe")):
+        net = r - base_cost * mult
+        out[key] = _sharpe_periodic(net) * np.sqrt(apy)
+    return {k: float(v) for k, v in out.items()}
+
+
+# ===========================================================================
+# 6. 綜合裁決(誠實、保守)
+# ===========================================================================
+def _verdict(signals: dict) -> dict:
+    """收集所有訊號 → overall / score_0to100 / reasons(人話)/ red_flags。"""
+    reasons, red_flags = [], []
+    score = 50.0
+
+    dsr = signals.get("dsr_prob")
+    pbo = signals.get("pbo")
+    perm_p = signals.get("perm_p")
+    perm_pass = signals.get("perm_pass")
+    cost3 = signals.get("cost3_sharpe")
+    beats_bench = signals.get("beats_bench")
+    excess_cagr = signals.get("excess_cagr")
+    conc = signals.get("concentration")
+    n_trials = signals.get("n_trials", 1)
+    n_periods = signals.get("n_periods", 0)
+    real_sharpe = signals.get("real_sharpe")
+
+    overfit = False
+    real = True  # 先假設 real,逐條扣
+
+    # --- DSR ---
+    if dsr is not None and np.isfinite(dsr):
+        if dsr >= 0.95:
+            reasons.append(f"通縮夏普(DSR)={dsr:.2f}:扣掉試了 {n_trials} 種參數的多重檢定後,真實有 edge 的機率仍高。")
+            score += 18
+        elif dsr >= 0.60:
+            reasons.append(f"通縮夏普(DSR)={dsr:.2f}:過了雜訊地板(0.60),但信心非頂級——別當鐵板。")
+            score += 6
+        else:
+            reasons.append(f"通縮夏普(DSR)={dsr:.2f} < 0.60:扣掉多重檢定後,真有 edge 的機率不到一半,高度疑似雜訊。")
+            red_flags.append(f"DSR={dsr:.2f} 低於雜訊地板 0.60。")
+            score -= 22
+            overfit = True
+            real = False
+    else:
+        reasons.append("DSR 無法計算(樣本或變異不足),不納入判斷。")
+
+    # --- PBO ---
+    if pbo is not None and np.isfinite(pbo):
+        if pbo > 0.5:
+            reasons.append(f"回測過配機率(PBO)={pbo:.2f} > 0.50:樣本內選到的最佳者,樣本外多半墊底——典型過擬合特徵。")
+            red_flags.append(f"PBO={pbo:.2f} > 0.50。")
+            score -= 20
+            overfit = True
+            real = False
+        else:
+            reasons.append(f"回測過配機率(PBO)={pbo:.2f} ≤ 0.50:樣本內贏家在樣本外沒有系統性崩盤。")
+            score += 10
+    # returns 模式無 PBO,不扣分
+
+    # --- permutation null ---
+    if perm_p is not None and np.isfinite(perm_p):
+        if perm_p > 0.5:
+            reasons.append(f"隨機重排檢定 p={perm_p:.2f} > 0.50:把報酬時序打亂後,一半以上的隨機版本夏普不輸真實——沒看到真訊號。")
+            red_flags.append(f"permutation p={perm_p:.2f} > 0.50。")
+            score -= 18
+            overfit = True
+            real = False
+        elif perm_pass:
+            reasons.append(f"隨機重排檢定 p={perm_p:.2f}:真實夏普勝過 95% 的隨機打亂版本,時序結構帶了資訊。")
+            score += 14
+        else:
+            reasons.append(f"隨機重排檢定 p={perm_p:.2f}:未勝過隨機 p95 門檻,訊號不夠乾淨。")
+            score -= 4
+            real = False
+
+    # --- 成本 ×3 ---
+    if cost3 is not None and np.isfinite(cost3):
+        if cost3 > 0:
+            reasons.append(f"成本壓力 ×3 後夏普={cost3:.2f} 仍為正:對交易成本有一定緩衝。")
+            score += 8
+        else:
+            reasons.append(f"成本壓力 ×3 後夏普={cost3:.2f} ≤ 0:成本稍微保守就翻負,edge 恐被摩擦吃光。")
+            red_flags.append("成本 ×3 後夏普轉負。")
+            score -= 12
+            real = False
+
+    # --- 贏基準 ---
+    if beats_bench is not None:
+        if beats_bench:
+            xc = f"(超額 CAGR {excess_cagr*100:+.1f}%)" if excess_cagr is not None and np.isfinite(excess_cagr) else ""
+            reasons.append(f"夏普勝過基準{xc}:相對買進持有有加值。")
+            score += 8
+        else:
+            reasons.append("夏普未勝過基準:相對買進持有沒有明顯優勢,先確認是否值得多做這些交易。")
+            score -= 8
+            real = False
+
+    # --- 集中度 ---
+    if conc is not None and np.isfinite(conc):
+        if conc >= 0.40:
+            reasons.append(f"報酬集中度={conc*100:.0f}%:最好那一期就貢獻近半以上報酬,績效靠少數暴衝,脆弱。")
+            red_flags.append(f"單期集中度 {conc*100:.0f}% ≥ 40%。")
+            score -= 12
+            real = False
+        else:
+            reasons.append(f"報酬集中度={conc*100:.0f}%:報酬分布相對均勻,不靠少數幾根。")
+            score += 4
+
+    # --- n_trials 懲罰 ---
+    if n_trials and n_trials > 20:
+        pen = min(15.0, 3.0 * np.log10(n_trials))
+        reasons.append(f"你試了 {n_trials} 種參數:試越多,靠運氣撞到漂亮結果的機率越高,已按此扣分。")
+        score -= pen
+    elif n_trials and n_trials > 1:
+        reasons.append(f"你試了 {n_trials} 種參數:已納入多重檢定校正(DSR)。")
+
+    # --- 樣本量提醒 ---
+    if n_periods and n_periods < 60:
+        reasons.append(f"樣本只有 {n_periods} 期:統計檢定力弱,任何結論都要打折看待。")
+        red_flags.append(f"樣本過短(僅 {n_periods} 期)。")
+        score -= 8
+
+    # --- 綜合判定 ---
+    score = float(np.clip(score, 0, 100))
+    if overfit:
+        overall = "likely-overfit"
+    elif real and score >= 62:
+        overall = "likely-real"
+    else:
+        overall = "inconclusive"
+
+    # 誠實收尾:過關不等於會賺
+    if overall == "likely-real":
+        reasons.append("重要:通過這些檢定只代表『沒發現明顯的過度擬合』,不保證未來會賺——真金白銀前請務必前向(walk-forward)驗證與小額實測。")
+    elif overall == "inconclusive":
+        reasons.append("結論不明:證據不足以判定真偽,建議補更多樣本或做前向測試再定奪。")
+    else:
+        reasons.append("提醒:即使某些指標好看,上述紅旗顯示這條策略八成是過擬合的產物,別下真錢。")
+
+    return {"overall": overall, "score_0to100": round(score, 1),
+            "reasons": reasons, "red_flags": red_flags}
+
+
+# ===========================================================================
+# 7. 統一入口
+# ===========================================================================
+def _infer_ppy(dates, fallback):
+    if fallback:
+        return float(fallback)
+    if dates and len(dates) > 2:
+        try:
+            idx = pd.to_datetime(pd.Series(dates))
+            total_days = (idx.iloc[-1] - idx.iloc[0]).total_seconds() / 86400.0
+            steps = len(idx) - 1
+            if total_days > 0 and steps > 0:
+                # 用「總span/步數」= 平均每步天數(含週末缺口),日資料 → ~1.4 天/步 → ~260/年,
+                # 週資料 → 7 → ~52,月 → ~30 → ~12。比 median 誠實(median 會把週末缺口洗掉)。
+                avg_days = total_days / steps
+                return float(np.clip(round(365.0 / avg_days), 1, 35040))
+        except Exception:
+            pass
+    return 252.0
+
+
+def analyze(payload: dict) -> dict:
+    """統一裁判入口。契約見模組 docstring / README。純函數。"""
+    warnings = []
+    mode = payload.get("mode", "returns")
+    dates = payload.get("dates")
+    n_trials = int(payload.get("n_trials") or 1)
+    ppy = _infer_ppy(dates, payload.get("periods_per_year"))
+    bench_ret = payload.get("benchmark_returns")
+    cost_bps = payload.get("cost_bps_per_turnover")
+    turnover = payload.get("turnover")
+
+    # ---- 取主報酬序列 ----
+    if mode == "matrix":
+        matrix = payload.get("matrix") or {}
+        if not matrix:
+            return {"ok": False, "warnings": ["matrix 模式但 matrix 為空"],
+                    "metrics": {}, "verdict": {"overall": "inconclusive",
+                    "score_0to100": 0, "reasons": ["無資料"], "red_flags": []}}
+        names = list(matrix.keys())
+        cols = [np.asarray(matrix[k], dtype=float) for k in names]
+        T = min(len(c) for c in cols)
+        cols = [c[:T] for c in cols]
+        mat = np.column_stack(cols)
+        mat = np.nan_to_num(mat, nan=0.0)
+        # 主序列 = matrix 內每期 Sharpe 最高者(使用者最可能上手的贏家)
+        col_sr = np.array([_sharpe_periodic(mat[:, k]) for k in range(mat.shape[1])])
+        best_k = int(np.nanargmax(col_sr)) if col_sr.size else 0
+        returns = mat[:, best_k]
+        trial_sharpes = col_sr
+        n_trials = max(n_trials, len(names))
+    else:
+        returns = np.nan_to_num(np.asarray(payload.get("returns") or [], dtype=float), nan=0.0)
+        if returns.size == 0:
+            return {"ok": False, "warnings": ["returns 模式但 returns 為空"],
+                    "metrics": {}, "verdict": {"overall": "inconclusive",
+                    "score_0to100": 0, "reasons": ["無資料"], "red_flags": []}}
+        names, mat = None, None
+        trial_sharpes = np.array([_sharpe_periodic(returns)])
+
+    n = returns.size
+    if n < 30:
+        warnings.append(f"樣本僅 {n} 期,統計檢定力弱,結論僅供參考。")
+
+    # ---- 指標 ----
+    metrics = compute_metrics(returns, ppy)
+
+    # ---- DSR ----
+    dsr_res = deflated_sharpe(returns, n_trials, trial_sharpes)
+    sr_annual = metrics["sharpe"]
+    dsr = {"sr_annual": sr_annual, "sr0": float(dsr_res["sr0_daily"] * np.sqrt(ppy)),
+           "dsr_prob": dsr_res["dsr"], "p_value": dsr_res["p_value"], "n_trials": n_trials}
+
+    # ---- permutation null ----
+    perm = permutation_null(returns, ppy)
+
+    # ---- PBO / FWER(僅 matrix)----
+    pbo_out = None
+    fwer_out = None
+    if mode == "matrix" and mat is not None and mat.shape[1] >= 2:
+        pbo_out = pbo_cscv(mat, 12)
+        bench_arr = (np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)[:mat.shape[0]]
+                     if bench_ret is not None else np.zeros(mat.shape[0]))
+        if bench_arr.size < mat.shape[0]:
+            bench_arr = np.zeros(mat.shape[0])
+        fw = run_fwer_gates(mat, names, bench_arr, n_blocks_pbo=12)
+        fwer_out = {"spa": fw["spa"], "per_candidate": fw["per_candidate"],
+                    "n_rejected": fw["n_rejected"]}
+        if not fw["computed"]:
+            warnings.append(f"FWER 未計算:{fw.get('reason', '樣本不足')}(需 ≥100 期)。")
+
+    # ---- 成本壓力(僅有 turnover)----
+    cost_out = None
+    if turnover is not None and cost_bps is not None:
+        cost_out = cost_stress(returns, turnover, float(cost_bps), ppy)
+
+    # ---- 基準比較 ----
+    bench_cmp = None
+    if bench_ret is not None:
+        b = np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)[:n]
+        if b.size >= 2:
+            bm = compute_metrics(b, ppy)
+            excess = (metrics["cagr"] - bm["cagr"]) if (np.isfinite(metrics["cagr"]) and np.isfinite(bm["cagr"])) else float("nan")
+            beats = (np.isfinite(metrics["sharpe"]) and np.isfinite(bm["sharpe"])
+                     and metrics["sharpe"] > bm["sharpe"])
+            bench_cmp = {"bench_sharpe": bm["sharpe"], "bench_cagr": bm["cagr"],
+                         "excess_cagr": excess, "strategy_beats": bool(beats)}
+
+    # ---- 綜合裁決 ----
+    verdict = _verdict({
+        "dsr_prob": dsr["dsr_prob"],
+        "pbo": pbo_out["pbo"] if pbo_out else None,
+        "perm_p": perm["p_value"], "perm_pass": perm["passes"],
+        "cost3_sharpe": cost_out["x3_sharpe"] if cost_out else None,
+        "beats_bench": bench_cmp["strategy_beats"] if bench_cmp else None,
+        "excess_cagr": bench_cmp["excess_cagr"] if bench_cmp else None,
+        "concentration": metrics["top_bar_concentration"],
+        "n_trials": n_trials, "n_periods": n, "real_sharpe": perm["real_sharpe"],
+    })
+
+    # ---- equity curves ----
+    equity_curve = _equity_from_returns(returns).tolist()
+    bench_curve = None
+    if bench_cmp is not None:
+        b = np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)[:n]
+        bench_curve = _equity_from_returns(b).tolist()
+
+    return {
+        "ok": True, "warnings": warnings,
+        "metrics": metrics, "dsr": dsr, "permutation_null": perm,
+        "pbo": pbo_out, "fwer": fwer_out, "cost_stress": cost_out,
+        "benchmark_compare": bench_cmp, "verdict": verdict,
+        "equity_curve": equity_curve, "benchmark_curve": bench_curve,
+    }
