@@ -160,12 +160,49 @@ h1, h2, h3 { font-family: var(--display); font-weight: 700; letter-spacing: -0.0
   box-shadow: 0 0 14px var(--scan-glow), inset 0 0 8px var(--scan-glow);
 }
 .brand b { color: var(--scan); font-weight: 600; }
+.topbar-right {
+  display: flex; align-items: center; gap: 16px;
+}
 .topbar .status {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--ink-2);
   display: flex; align-items: center; gap: 8px;
   letter-spacing: 0.06em;
+}
+
+/* 語言切換:克制的 段式開關,沿用暗房器械感(方角、細邊、青綠 active) */
+.lang-toggle {
+  display: inline-flex;
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-2);
+}
+.lang-btn {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 5px 11px;
+  border: none;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: color .15s, background .15s;
+  line-height: 1.4;
+}
+.lang-btn + .lang-btn { border-left: 1px solid var(--line-bright); }
+.lang-btn:hover { color: var(--ink-0); }
+.lang-btn[aria-pressed="true"] {
+  color: var(--bg-0);
+  background: var(--scan);
+  font-weight: 600;
+}
+@media (max-width: 420px) {
+  .topbar-right { gap: 10px; }
+  .lang-btn { padding: 5px 9px; }
+  /* 極窄屏隱藏引擎狀態文字,保留燈點與語言鈕,避免頂欄擠爆 */
+  .topbar .status #engineStatus { display: none; }
 }
 .dot {
   width: 7px; height: 7px; border-radius: 50%;
@@ -664,6 +701,11 @@ section { padding: 54px 0; }
   letter-spacing: 0.1em;
   color: var(--ink-3);
   white-space: nowrap;
+  text-align: center;
+}
+/* 窄屏(尤其英文較長)允許換行,避免頂出分隔線造成橫向溢出 */
+@media (max-width: 560px) {
+  .tech-divider-txt { white-space: normal; }
 }
 
 .verdict-top {
