@@ -60,7 +60,7 @@
       </p>
       <div class="hero-meta reveal d4">
         <span class="chip"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="1"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span data-i18n="hero_chip1">資料不離開你的瀏覽器</span></span>
-        <span class="chip"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="4"/></svg><span data-i18n="hero_chip2">最多七道統計閘,依資料啟用</span></span>
+        <span class="chip"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="4"/></svg><span data-i18n="hero_chip2">最多七道統計閘 · 依資料啟用</span></span>
         <span class="chip"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span data-i18n="hero_chip3">純靜態,零後端上傳</span></span>
       </div>
     </div>
@@ -186,6 +186,8 @@
 
         <!-- 白話首屏:給不懂統計的朋友,秒懂這條曲線信不信得過 -->
         <div class="plain-verdict">
+          <!-- 短窗外插醒目警告條(short_calendar_span 時由 app.js 填入並顯示) -->
+          <div class="span-warn hidden" id="spanWarnBar" role="alert"></div>
           <div class="plain-tag"><span class="pdot"></span><span id="plainTag">—</span></div>
           <p class="plain-headline" id="plainHeadline">—</p>
           <ul class="plain-points" id="plainPoints"></ul>

@@ -1,0 +1,7 @@
+# Edge Validator engine 測試相依(引擎 runtime 只需 numpy/pandas;scipy 僅測試對照用)。
+# 版本下限:test_engine.py 不再用 pandas 版本敏感的 freq 別名("M"/"ME"),
+# pandas 2.0-3.x 皆可跑。
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+pytest>=7.0

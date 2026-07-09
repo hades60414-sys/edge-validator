@@ -25,6 +25,10 @@ LOCAL_ARCHITECTURE.md
 LOOP_STATE.md
 R0_BUILD_SPEC.md
 run_local.bat
+# 每日快照排程 bat:含個人絕對路徑(marketvault venv / repo 路徑)+ schtasks 指令,不進公開 repo
+run_snapshot_daily.bat
+# 每日快照排程 log(可能含持倉/路徑痕跡)
+local/.snapshot_daily.log
 
 # watch/ 資料夾只保留說明,不收使用者投放物
 watch/*

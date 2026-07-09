@@ -54,7 +54,7 @@ const STRINGS = {
       + '然後用一整套學界標準的統計檢定,試著反駁你。過得了關的,才可能是真 edge;過不了的,'
       + '恭喜你在賠真錢之前就知道了。',
     hero_chip1: '資料不離開你的瀏覽器',
-    hero_chip2: '最多七道統計閘,依資料啟用',
+    hero_chip2: '最多七道統計閘 · 依資料啟用',
     hero_chip3: '純靜態,零後端上傳',
 
     // —— STEP 01 上傳 ——
@@ -240,6 +240,8 @@ const STRINGS = {
     // —— DSR 閘 ——
     g_dsr_title: '通縮夏普 DSR', g_dsr_sub: 'Deflated Sharpe · 多重檢定校正',
     g_dsr_note: (n) => `扣掉你試了 ${n} 種參數的運氣成分後,真有 edge 的機率。門檻:雜訊地板 0.60、高信心 0.95。`,
+    // 硬化揭露:引擎有效 n_trials > 使用者申報值(matrix 雜訊硬化上調)時,照實講清楚。
+    g_dsr_note_hardened: (declared, eff) => `你申報試過 ${declared} 種,引擎依雜訊硬化規則保守上調為 ${eff} 種做通縮(防止幸運的雜訊欄矇混過關)。扣掉這份運氣後,真有 edge 的機率。門檻:雜訊地板 0.60、高信心 0.95。`,
     g_dsr_prob: '真實有 edge 機率', g_dsr_sr: '年化夏普', g_dsr_sr0: '通縮門檻 SR₀', g_dsr_p: 'p 值',
     // —— permutation 閘 ——
     g_perm_title: '隨機重排檢定', g_perm_sub: 'Matched-null · block-bootstrap',
@@ -253,6 +255,8 @@ const STRINGS = {
     // —— SPA / Romano-Wolf 閘 ——
     g_spa_title: 'SPA + Romano-Wolf', g_spa_sub: 'Hansen 優越性 · 家族誤差修正',
     g_spa_note: '資料挖掘後,最佳策略真的贏過基準嗎?多重比較修正後還能倖存幾條。',
+    g_spa_note_zero_nobench: '⚠ 你沒選對照基準:此檢定實際比的是【絕對報酬】(vs 零基準),「倖存」≠「贏過基準」。',
+    g_spa_note_zero_fallback: (cov) => `⚠ 你的基準只覆蓋 ${cov}% 期數、無法逐期配對:此檢定誠實改比【絕對報酬】(vs 零基準),「倖存」≠「贏過基準」——與下方基準比較卡語意不同。`,
     g_spa_p: 'SPA p 值', g_spa_best: '最佳候選', g_spa_nrej: '倖存候選數',
     // —— 成本壓力閘 ——
     g_cost_title: '成本壓力測試', g_cost_sub: 'round-trip bps · ×1/×3/×6',
@@ -272,6 +276,12 @@ const STRINGS = {
     ph_money_profit: (c) => `這條曲線看起來很賺(年化約 ${c})`,
     ph_money_loss: (c) => `這條曲線其實在虧(年化約 ${c})`,
     ph_money_neutral: '先看這條曲線的體質',
+    // 短日曆跨度(<0.5 年):年化 = 短窗外插易膨風 → 主數字降級為期間累計報酬,不做年化外插。
+    ph_money_profit_span: (tot, yrs) => `這條曲線這段期間累計賺約 ${tot}(資料僅約 ${yrs} 年,短窗不做年化外插)`,
+    ph_money_loss_span: (tot, yrs) => `這條曲線這段期間累計虧約 ${tot}(資料僅約 ${yrs} 年,短窗不做年化外插)`,
+    ph_money_span_suffix: '(短窗外插,易膨風)',
+    // 短窗醒目警告條(從小字警語升級)
+    span_warn_label: '短窗外插警告',
     ph_beat_sharpe_less: (x) => `、風險調整後(夏普)贏過無腦買進持有,但年化其實少賺約 ${x}——你是用更低的波動換到的`,
     ph_beat_win: (x) => `、而且贏過無腦買進持有基準${x}`,
     ph_beat_win_more: (x) => `,多賺約 ${x}`,
@@ -295,7 +305,9 @@ const STRINGS = {
     // ② DSR(clause 三態:真試驗池 / SR 標準誤保守通縮 proxy(單序列宣稱 n_trials>1)/ 單條)
     pt_dsr_trial_multi: (n) => `扣掉你試了 ${n} 種參數的運氣後`,
     pt_dsr_trial_multi_proxy: (n) => `以 SR 估計標準誤作試驗離散度的保守下限、通縮「試了 ${n} 種參數」的運氣後(單一序列無真試驗池)`,
-    pt_dsr_trial_single: '你只丟了一條曲線(當作沒調參)',
+    // 硬化揭露:引擎有效 n_trials > 申報值 → 白話重點照實交代上調。
+    pt_dsr_trial_hardened: (declared, eff) => `你申報試過 ${declared} 種,引擎依雜訊硬化規則保守上調為 ${eff} 種通縮(防止幸運的雜訊欄過關)後`,
+    pt_dsr_trial_single: '你未申報搜參(n_trials=1),以單曲線口徑檢定',
     pt_dsr_high: (clause, prob) => `<b>扣掉「試很多次」的運氣後還站得住嗎:站得住。</b>${clause},真有 edge 的機率約 ${prob}——高信心。`,
     pt_dsr_mid: (clause, prob) => `<b>扣掉「試很多次」的運氣後還站得住嗎:勉強站上雜訊地板。</b>${clause},真有 edge 的機率約 ${prob}(過了 60% 的雜訊地板,但沒到 95% 高信心)。`,
     pt_dsr_low: (clause, prob) => `<b>扣掉「試很多次」的運氣後還站得住嗎:站不住。</b>${clause},真有 edge 的機率只剩約 ${prob}——這漂亮數字多半是挑出來的運氣。`,
@@ -307,11 +319,15 @@ const STRINGS = {
     pt_bench_lose: (c) => `<b>贏過無腦買進持有嗎:沒贏${c}。</b>先確認多做這些交易值不值得。`,
     pt_bench_lose_less: (x) => `,年化少賺約 ${x}`,
     pt_bench_na: '<b>贏過無腦買進持有嗎:</b>你沒選對照基準(或資料無法對齊),這次略過比較。想比就在上方「對照基準」挑一條。',
-    // matrix FWER 句
-    pt_fwer_survive: (nStrat, nRej) => `<b>一次比 ${nStrat}條策略,幾條經得起考驗:${nRej} 條倖存。</b>`
-      + `多重比較修正(把「比越多越容易矇到一條」的運氣扣掉)後,還有 ${nRej} 條真的贏過基準。`,
+    // matrix FWER 句(kindClause 依 fwer.benchmark_kind 分流——aligned=真贏基準;zero=絕對報酬,勿當贏基準)
+    pt_fwer_survive: (nStrat, nRej, kindClause) => `<b>一次比 ${nStrat}條策略,幾條經得起考驗:${nRej} 條倖存。</b>`
+      + `多重比較修正(把「比越多越容易矇到一條」的運氣扣掉)後,${kindClause}`,
+    pt_fwer_kind_aligned: (nRej) => `還有 ${nRej} 條在家族錯誤率(FWER)控制下顯著贏過基準。`,
+    pt_fwer_kind_zero_nobench: (nRej) => `${nRej} 條顯著繳出正的【絕對報酬】(vs 零基準——你沒選對照基準,此檢定比的是絕對報酬,不是贏過基準)。`,
+    pt_fwer_kind_zero_fallback: (nRej, cov) => `${nRej} 條顯著繳出正的【絕對報酬】(vs 零基準)。你的基準只覆蓋 ${cov}% 期數、無法逐期配對,此檢定誠實改比絕對報酬——與基準比較卡語意不同,勿當「贏過基準」。`,
+    pt_fwer_survivor_caveat: '倖存 ≠ 判決:總判決以 DSR/PBO 為準;α=10% 下純雜訊平均每 10 次也會出現 1 次倖存者。',
     pt_fwer_wipe: (nStrat) => `<b>一次比 ${nStrat}條策略,幾條經得起考驗:全軍覆沒。</b>`
-      + '把「比越多越容易矇到」的運氣扣掉後,沒有任何一條穩穩贏過基準——這正是「一堆策略挑最好的一條」最典型的雜訊陷阱。',
+      + '把「比越多越容易矇到」的運氣扣掉後,沒有任何一條穩穩過關——這正是「一堆策略挑最好的一條」最典型的雜訊陷阱。',
     pt_pbo: (pbo, tail) => `<b>挑出來的最佳策略,樣本外會不會墊底:</b>過配機率 PBO = ${pbo}${tail}`,
     pt_pbo_over: '(>0.5,典型過擬合特徵——樣本內的冠軍到樣本外常墊底)。',
     pt_pbo_ok: '(≤0.5,沒有系統性崩盤)。',
@@ -340,7 +356,7 @@ const STRINGS = {
       + '<strong>assumes your strategy is fake</strong>, then throws a full battery of academic-grade statistical tests at it, trying to disprove you. '
       + "What survives might be a real edge; what doesn't — congratulations, you found out before betting real money.",
     hero_chip1: 'Your data never leaves the browser',
-    hero_chip2: 'Up to seven statistical gates, enabled by your data',
+    hero_chip2: 'Up to seven statistical gates · enabled by your data',
     hero_chip3: 'Fully static, zero backend upload',
 
     // —— STEP 01 upload ——
@@ -526,6 +542,8 @@ const STRINGS = {
     // —— DSR gate ——
     g_dsr_title: 'Deflated Sharpe (DSR)', g_dsr_sub: 'Deflated Sharpe · multiple-testing correction',
     g_dsr_note: (n) => `The probability of a real edge after stripping out the luck of trying ${n} parameter set(s). Thresholds: noise floor 0.60, high confidence 0.95.`,
+    // Hardening disclosure: engine's effective n_trials > user-declared value (matrix noise-hardening).
+    g_dsr_note_hardened: (declared, eff) => `You declared ${declared} parameter set(s) tried; under its noise-hardening rule the engine conservatively raised the deflation count to ${eff} (to keep a lucky noise column from sneaking through). The probability of a real edge after stripping out that luck. Thresholds: noise floor 0.60, high confidence 0.95.`,
     g_dsr_prob: 'P(real edge)', g_dsr_sr: 'Ann. Sharpe', g_dsr_sr0: 'Deflated threshold SR₀', g_dsr_p: 'p-value',
     // —— permutation gate ——
     g_perm_title: 'Permutation shuffle test', g_perm_sub: 'Matched-null · block-bootstrap',
@@ -539,6 +557,8 @@ const STRINGS = {
     // —— SPA / Romano-Wolf gate ——
     g_spa_title: 'SPA + Romano-Wolf', g_spa_sub: 'Hansen superiority · FWER control',
     g_spa_note: 'After the data mining, does the best strategy genuinely beat the benchmark? How many survive multiple-comparison correction.',
+    g_spa_note_zero_nobench: '⚠ No benchmark selected: this test actually compares ABSOLUTE returns (vs a zero benchmark) — "survivors" ≠ "beat the benchmark."',
+    g_spa_note_zero_fallback: (cov) => `⚠ Your benchmark covers only ${cov}% of periods and cannot be paired period-by-period: this test honestly falls back to ABSOLUTE returns (vs zero) — "survivors" ≠ "beat the benchmark," different in meaning from the Benchmark card below.`,
     g_spa_p: 'SPA p-value', g_spa_best: 'Best candidate', g_spa_nrej: 'Survivors',
     // —— cost stress gate ——
     g_cost_title: 'Cost stress test', g_cost_sub: 'round-trip bps · ×1/×3/×6',
@@ -558,6 +578,12 @@ const STRINGS = {
     ph_money_profit: (c) => `This curve looks profitable (~${c}/yr)`,
     ph_money_loss: (c) => `This curve is actually losing money (~${c}/yr)`,
     ph_money_neutral: "Let's look at this curve's constitution first",
+    // Short calendar span (<0.5y): annualized figures are short-window extrapolations →
+    // demote the headline number to the period total return, no annualized extrapolation.
+    ph_money_profit_span: (tot, yrs) => `This curve gained about ${tot} over the period covered (only ~${yrs} years of data — no annualized extrapolation on a short window)`,
+    ph_money_loss_span: (tot, yrs) => `This curve lost about ${tot} over the period covered (only ~${yrs} years of data — no annualized extrapolation on a short window)`,
+    ph_money_span_suffix: ' (short-window extrapolation — easily overstated)',
+    span_warn_label: 'SHORT-WINDOW EXTRAPOLATION WARNING',
     ph_beat_sharpe_less: (x) => `, and on a risk-adjusted (Sharpe) basis it beats naive buy-and-hold — but it actually earns about ${x} less per year, which you bought with lower volatility`,
     ph_beat_win: (x) => `, and it beats naive buy-and-hold${x}`,
     ph_beat_win_more: (x) => `, earning about ${x} more per year`,
@@ -582,7 +608,9 @@ const STRINGS = {
     // "With " (the old assembly produced "With after stripping out…" — R12 LOW fix).
     pt_dsr_trial_multi: (n) => `After stripping out the luck of trying ${n} parameter sets`,
     pt_dsr_trial_multi_proxy: (n) => `After conservatively deflating for the luck of trying ${n} parameter sets — using the Sharpe-ratio standard error as a lower bound on trial dispersion, since a single series carries no true trial pool`,
-    pt_dsr_trial_single: 'With only one curve handed in (treated as no tuning)',
+    // Hardening disclosure: effective n_trials > declared → say so plainly in the three points.
+    pt_dsr_trial_hardened: (declared, eff) => `You declared ${declared} parameter set(s) tried, and under its noise-hardening rule the engine conservatively raised the deflation count to ${eff} (to keep a lucky noise column from passing); after stripping out that luck`,
+    pt_dsr_trial_single: 'With no parameter search declared (n_trials=1), judged on a single-curve basis',
     pt_dsr_high: (clause, prob) => `<b>Still holds after removing "many tries" luck? Yes.</b> ${clause}, the probability of a real edge is about ${prob} — high confidence.`,
     pt_dsr_mid: (clause, prob) => `<b>Still holds after removing "many tries" luck? Barely, above the noise floor.</b> ${clause}, the probability of a real edge is about ${prob} (past the 60% noise floor, but short of 95% high confidence).`,
     pt_dsr_low: (clause, prob) => `<b>Still holds after removing "many tries" luck? No.</b> ${clause}, the probability of a real edge drops to about ${prob} — this pretty number is mostly cherry-picked luck.`,
@@ -594,11 +622,15 @@ const STRINGS = {
     pt_bench_lose: (c) => `<b>Beats naive buy-and-hold? No${c}.</b> First make sure all that extra trading is worth it.`,
     pt_bench_lose_less: (x) => `, earning about ${x} less per year`,
     pt_bench_na: '<b>Beats naive buy-and-hold?</b> You picked no benchmark (or the data couldn\'t be aligned), so the comparison is skipped this time. Pick one under "Benchmark" above to compare.',
-    // matrix FWER
-    pt_fwer_survive: (nStrat, nRej) => `<b>Testing ${nStrat}strategies at once, how many hold up: ${nRej} survive.</b> `
-      + `After multiple-comparison correction (removing the luck of "the more you compare, the easier to hit one"), ${nRej} genuinely beat the benchmark.`,
+    // matrix FWER (kindClause branches on fwer.benchmark_kind — aligned = beats benchmark; zero = absolute return, not benchmark-beating)
+    pt_fwer_survive: (nStrat, nRej, kindClause) => `<b>Testing ${nStrat}strategies at once, how many hold up: ${nRej} survive.</b> `
+      + `After multiple-comparison correction (removing the luck of "the more you compare, the easier to hit one"), ${kindClause}`,
+    pt_fwer_kind_aligned: (nRej) => `${nRej} genuinely beat the benchmark under family-wise error (FWER) control.`,
+    pt_fwer_kind_zero_nobench: (nRej) => `${nRej} deliver statistically positive ABSOLUTE returns (vs a zero benchmark — no benchmark selected, so this tests absolute return, not benchmark-beating).`,
+    pt_fwer_kind_zero_fallback: (nRej, cov) => `${nRej} show statistically positive ABSOLUTE returns (vs a zero benchmark). Your benchmark covers only ${cov}% of periods and cannot be paired period-by-period, so this test honestly falls back to absolute returns — different in meaning from the Benchmark card.`,
+    pt_fwer_survivor_caveat: 'Survivors ≠ verdict — the verdict follows DSR/PBO; at α=10%, even pure noise yields a survivor about 1 run in 10.',
     pt_fwer_wipe: (nStrat) => `<b>Testing ${nStrat}strategies at once, how many hold up: wiped out.</b> `
-      + 'After removing the "more comparisons, more flukes" luck, not a single one cleanly beats the benchmark — this is the textbook noise trap of "pick the best of a pile of strategies."',
+      + 'After removing the "more comparisons, more flukes" luck, not a single one cleanly holds up — this is the textbook noise trap of "pick the best of a pile of strategies."',
     pt_pbo: (pbo, tail) => `<b>Will the chosen best strategy bottom out out-of-sample:</b> overfit probability PBO = ${pbo}${tail}`,
     pt_pbo_over: ' (>0.5, a classic overfit signature — the in-sample champion often ends up last out-of-sample).',
     pt_pbo_ok: ' (≤0.5, no systematic collapse).',
@@ -665,6 +697,7 @@ const STRINGS = {
     rw_returns_empty: () => 'Returns mode, but the returns series is empty.',
     rw_short_calendar_span: (p) => `The data spans only ${fmt(p.span_years, 2)} calendar years (under 0.5): every annualized number (ann. Sharpe / CAGR / ann. vol) extrapolates a short window to a full year, so their usefulness is limited — accumulate at least half a year before reading annualized figures.`,
     rw_long_series_guard: (p) => `Long series (${p.n} periods): permutation resamples reduced to ${p.n_perm} and bootstrap to ${p.n_boot} (browser performance guard; p-value resolution gets coarser, the test semantics are unchanged).`,
+    rw_fwer_bench_fallback_zero: (p) => `SPA / Romano–Wolf benchmark fallback: your benchmark covers only ${Math.round((p.coverage || 0) * 100)}% of periods (${p.bench_len}/${p.n_periods}) and cannot be paired period-by-period, so these tests honestly compare against a ZERO benchmark (absolute return) instead — different in meaning from the Benchmark card, do not read "survivors" as "beat the benchmark."`,
     rw_ppy_fallback: (p) => `Date column failed to parse (${p.error}): annualization frequency fell back to 252 (daily). If your data is not daily, annualized Sharpe / CAGR will be distorted — fix the date format or set periods-per-year explicitly.`,
     // 偵測下沉層(engine detect_and_convert)
     rw_detect_kind_mismatch: (p) => `Series-type detection disagreed${p.col ? ` on column "${p.col}"` : ''}: the browser hinted "${p.js}" but the engine's authoritative check says "${p.py}". The engine's call (${p.py}) was used for the analysis — eyeball your data to make sure it really is ${p.py === 'nav' ? 'an equity/NAV curve' : 'per-period returns'}.`,
@@ -1264,6 +1297,8 @@ async function runAnalysis() {
     // 記住原始 key/args,切語言時重繪 warnings 用
     State.lastBenchNoteKey = benchNoteKey;
     State.lastBenchNoteArgs = benchNoteArgs || [];
+    // 硬化揭露:記住使用者「申報」的 n_trials,渲染時與引擎回的有效 n_trials 比對
+    State.lastDeclaredNTrials = nTrials;
 
     const payload = {
       mode: p.mode,
@@ -1349,15 +1384,27 @@ function plainHeadlineTag(overall) {
 
 // 把判決濃縮成一句人話(最大字)。動態依 verdict / CAGR / 贏不贏基準 / n_trials 生成。
 // 一個不懂統計的朋友只讀這一句,就該抓到「賺不賺 + 這數字信不信得過」。全部走 t(),中英同構。
-function plainHeadlineSentence(overall, metrics, benchCmp, nTrials) {
+function plainHeadlineSentence(overall, metrics, benchCmp, nTrials, spanInfo) {
   const cagr = metrics ? metrics.cagr : null;
   const looksProfitable = isNum(cagr) && cagr > 0;
 
-  // 賺賠開場
+  // 賺賠開場。短日曆跨度(short_calendar_span,<0.5 年)時年化 = 短窗外插易膨風:
+  // 主數字誠實降級為「期間累計報酬」;沒有期末淨值可算時退而加「(短窗外插)」註記。
   let money;
-  if (looksProfitable) money = t('ph_money_profit', fmtPct(cagr, 1));
-  else if (isNum(cagr) && cagr <= 0) money = t('ph_money_loss', fmtPct(cagr, 1));
-  else money = t('ph_money_neutral');
+  const finalEq = metrics ? metrics.final_equity : null;
+  if (spanInfo && isNum(finalEq)) {
+    const tot = finalEq - 1;
+    const yrsTxt = isNum(spanInfo.years) ? fmt(spanInfo.years, 2) : '<0.5';
+    money = tot >= 0
+      ? t('ph_money_profit_span', fmtPct(tot, 1), yrsTxt)
+      : t('ph_money_loss_span', fmtPct(Math.abs(tot), 1), yrsTxt);
+  } else if (looksProfitable) {
+    money = t('ph_money_profit', fmtPct(cagr, 1)) + (spanInfo ? t('ph_money_span_suffix') : '');
+  } else if (isNum(cagr) && cagr <= 0) {
+    money = t('ph_money_loss', fmtPct(cagr, 1)) + (spanInfo ? t('ph_money_span_suffix') : '');
+  } else {
+    money = t('ph_money_neutral');
+  }
 
   // 贏不贏基準(誠實處理四情境,避免「贏過…多賺 -6.9%」這種自相矛盾)
   // strategy_beats 是【風險調整後(夏普)】的勝負;excess_cagr 是【年化報酬】差,兩者可能不同號。
@@ -1427,9 +1474,14 @@ function plainThreePoints(out, benchCmp) {
       || ((out.verdict && out.verdict.reasons_coded) || []).some(c =>
            c && typeof c.code === 'string' && c.code.indexOf('dsr_') === 0
            && c.params && c.params.var_proxy === true);
-    const trialClause = nt > 1
-      ? t(varProxy ? 'pt_dsr_trial_multi_proxy' : 'pt_dsr_trial_multi', nt)
-      : t('pt_dsr_trial_single');
+    // 硬化揭露:引擎回的有效 n_trials > 使用者申報值(matrix 誠實基準/雜訊硬化上調)
+    // → 白話重點照實說「你申報 N 種,引擎保守上調為 M 種」,不讓上調靜默發生。
+    const declared = isNum(State.lastDeclaredNTrials) ? State.lastDeclaredNTrials : null;
+    const trialClause = (declared != null && nt > declared)
+      ? t('pt_dsr_trial_hardened', declared, nt)
+      : nt > 1
+        ? t(varProxy ? 'pt_dsr_trial_multi_proxy' : 'pt_dsr_trial_multi', nt)
+        : t('pt_dsr_trial_single');
     if (prob >= 0.95) {
       points.push({ icon: '🎯', text: t('pt_dsr_high', trialClause, fmtPct(prob, 0)) });
     } else if (prob >= 0.60) {
@@ -1467,7 +1519,18 @@ function plainThreePoints(out, benchCmp) {
     const nStratTxt = nStrat != null ? nStrat + ' ' : '';
     let txt;
     if (isNum(nRej)) {
-      txt = nRej > 0 ? t('pt_fwer_survive', nStratTxt, nRej) : t('pt_fwer_wipe', nStratTxt);
+      if (nRej > 0) {
+        // 依 fwer.benchmark_kind 分流語意:aligned=真贏基準;zero_*=絕對報酬,勿當贏基準(誠實揭露)
+        const bk = out.fwer && out.fwer.benchmark_kind;
+        const covPct = out.fwer && isNum(out.fwer.bench_coverage) ? Math.round(out.fwer.bench_coverage * 100) : null;
+        let kindClause;
+        if (bk === 'aligned') kindClause = t('pt_fwer_kind_aligned', nRej);
+        else if (bk === 'zero_fallback' && covPct != null) kindClause = t('pt_fwer_kind_zero_fallback', nRej, covPct);
+        else kindClause = t('pt_fwer_kind_zero_nobench', nRej);
+        txt = t('pt_fwer_survive', nStratTxt, nRej, kindClause) + ' ' + t('pt_fwer_survivor_caveat');
+      } else {
+        txt = t('pt_fwer_wipe', nStratTxt);
+      }
     } else if (isNum(pbo)) {
       txt = t('pt_pbo', fmt(pbo, 2), pbo > 0.5 ? t('pt_pbo_over') : t('pt_pbo_ok'));
     } else {
@@ -1536,6 +1599,23 @@ function renderResults(out, parsed, benchNote) {
   // warnings + bench note(引擎 warnings 走 codes,bench note / parse note 本就 i18n)
   const warnBox = $('warningsBox');
   const allWarn = [...codedStrings(out.warnings_coded, out.warnings, 'rw_')];
+  // 短窗外插警語升級:short_calendar_span 從小字警語列拉出來,升為判決卡頂部的醒目警告條
+  //(年化數字全是短窗外插,不該只用小字帶過)。coded 與 raw 逐位 1:1,索引可對齊。
+  const spanBar = $('spanWarnBar');
+  if (spanBar) {
+    let spanIdx = -1;
+    if (Array.isArray(out.warnings_coded) && out.warnings_coded.length === allWarn.length) {
+      spanIdx = out.warnings_coded.findIndex(c => c && c.code === 'short_calendar_span');
+    }
+    if (spanIdx >= 0 && allWarn[spanIdx] != null) {
+      spanBar.innerHTML = `<b>${escapeHtml(t('span_warn_label'))}</b><span>${escapeHtml(String(allWarn[spanIdx]))}</span>`;
+      spanBar.classList.remove('hidden');
+      allWarn.splice(spanIdx, 1);
+    } else {
+      spanBar.classList.add('hidden');
+      spanBar.innerHTML = '';
+    }
+  }
   if (benchNote) allWarn.push(benchNote);
   if (parsed && parsed.noteKey) allWarn.push(t('parse_prefix') + t(parsed.noteKey, ...(parsed.noteArgs || [])));
   if (allWarn.length) {
@@ -1554,6 +1634,20 @@ function renderResults(out, parsed, benchNote) {
   drawNullChart(out.permutation_null);
 }
 
+// 短日曆跨度偵測:引擎 warnings_coded 含 short_calendar_span(資料 <0.5 年)→
+// 回 {years}(供年化大字降級與醒目警告條);否則 null。
+function shortSpanInfo(out) {
+  const coded = out && out.warnings_coded;
+  if (!Array.isArray(coded)) return null;
+  for (const c of coded) {
+    if (c && c.code === 'short_calendar_span') {
+      const y = c.params && isNum(c.params.span_years) ? c.params.span_years : null;
+      return { years: y };
+    }
+  }
+  return null;
+}
+
 // 白話首屏:定調小標 + 一句話結論(最大字)+ 三個一句話重點。
 function renderPlain(out) {
   const v = out.verdict;
@@ -1562,7 +1656,7 @@ function renderPlain(out) {
   const benchCmp = out.benchmark_compare || null;
 
   $('plainTag').textContent = plainHeadlineTag(overall);
-  $('plainHeadline').textContent = plainHeadlineSentence(overall, out.metrics, benchCmp, nTrials);
+  $('plainHeadline').textContent = plainHeadlineSentence(overall, out.metrics, benchCmp, nTrials, shortSpanInfo(out));
 
   const list = $('plainPoints');
   list.innerHTML = '';
@@ -1642,10 +1736,15 @@ function renderGates(out) {
       else { bk = 'fail'; bt = t('b_noise'); }
     }
     const barW = isNum(prob) ? Math.round(prob * 100) : 0;
+    // 硬化揭露(閘卡):引擎有效 n_trials > 申報值 → 卡片註解照實交代保守上調
+    const declaredNT = isNum(State.lastDeclaredNTrials) ? State.lastDeclaredNTrials : null;
+    const dsrNote = (declaredNT != null && isNum(d.n_trials) && d.n_trials > declaredNT)
+      ? t('g_dsr_note_hardened', declaredNT, d.n_trials)
+      : t('g_dsr_note', d.n_trials);
     cards.push(gateCard({
       title: t('g_dsr_title'), sub: t('g_dsr_sub'),
       badgeKind: bk, badgeTxt: bt,
-      note: t('g_dsr_note', d.n_trials),
+      note: dsrNote,
       rows: [
         [t('g_dsr_prob'), fmt(prob, 3), isNum(prob) && prob >= 0.6 ? 'pos' : 'neg'],
         [t('g_dsr_sr'), fmt(d.sr_annual, 2), isNum(d.sr_annual) && d.sr_annual > 0 ? 'pos' : 'neg'],
@@ -1706,10 +1805,18 @@ function renderGates(out) {
     const nRej = out.fwer.n_rejected;
     let bk = 'na', bt = t('b_na');
     if (isNum(spa.p_value)) { if (spa.p_value <= 0.10) { bk = 'pass'; bt = t('b_survivor'); } else { bk = 'fail'; bt = t('b_wipeout'); } }
+    // 依 benchmark_kind 補誠實註記:zero 模式=比絕對報酬,勿當「贏過基準」
+    const bkind = out.fwer.benchmark_kind;
+    let spaNote = t('g_spa_note');
+    if (bkind === 'zero_no_benchmark') spaNote += ' ' + t('g_spa_note_zero_nobench');
+    else if (bkind === 'zero_fallback') {
+      const cv = isNum(out.fwer.bench_coverage) ? Math.round(out.fwer.bench_coverage * 100) : '?';
+      spaNote += ' ' + t('g_spa_note_zero_fallback', cv);
+    }
     cards.push(gateCard({
       title: t('g_spa_title'), sub: t('g_spa_sub'),
       badgeKind: bk, badgeTxt: bt,
-      note: t('g_spa_note'),
+      note: spaNote,
       rows: [
         [t('g_spa_p'), fmt(spa.p_value, 3), isNum(spa.p_value) && spa.p_value <= 0.1 ? 'pos' : 'neg'],
         [t('g_spa_best'), spa.best ? escapeHtml(String(spa.best)) : '—'],

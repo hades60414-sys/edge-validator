@@ -704,6 +704,27 @@ section { padding: 54px 0; }
 .plain-frame svg { flex: none; margin-top: 3px; color: var(--incon); }
 .plain-frame b { color: var(--incon); }
 
+/* 短窗外插醒目警告條(short_calendar_span 從小字警語升級;比 plain-frame 更搶眼) */
+.span-warn {
+  display: flex; flex-direction: column; gap: 5px;
+  margin: 0 0 18px;
+  padding: 12px 16px;
+  border: 1px solid var(--incon);
+  border-left: 4px solid var(--incon);
+  background: var(--incon-glow);
+  border-radius: var(--radius);
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: #e6cf9a;
+}
+.span-warn b {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--incon);
+}
+
 /* 技術區分隔:告訴一般讀者「以下可略」 */
 .tech-divider {
   display: flex; align-items: center; gap: 16px;

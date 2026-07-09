@@ -112,8 +112,10 @@ def test_infer_periods_from_dates():
     # 週資料 → ~52
     wk = pd.date_range("2023-01-01", periods=60, freq="W").astype(str).tolist()
     assert 50 <= jw._infer_ppy(wk, None) <= 53
-    # 月資料 → ~12
-    mo = pd.date_range("2020-01-31", periods=48, freq="ME").astype(str).tolist()
+    # 月資料 → ~12(不用 freq 別名:"ME" 需 pandas≥2.2、"M" 在 pandas 3 移除——
+    # 顯式 DateOffset 全版本相容)
+    mo = [str((pd.Timestamp("2020-01-31") + pd.DateOffset(months=i)).date())
+          for i in range(48)]
     assert 11 <= jw._infer_ppy(mo, None) <= 13
 
 
@@ -680,6 +682,144 @@ def test_score_breakdown_sums_to_score():
     # 錯誤路徑也帶(空 list,契約一致)
     bad = analyze({"mode": "returns", "returns": []})
     assert bad["verdict"]["score_breakdown"] == []
+
+
+# ===========================================================================
+# 7. R15 展示閘三傷修復回歸:FWER 基準對齊誠實化 + SPA/RW 校準手術
+# ===========================================================================
+def _noise_matrix(K, T, seed, scale=0.012):
+    rng = np.random.default_rng(seed)
+    return {f"c{i}": (scale * rng.standard_normal(T)).tolist() for i in range(K)}
+
+
+def test_fwer_bench_fallback_zero_disclosed_at_92pct():
+    """R14 MED×2 釘死:基準覆蓋 92%(前端日期交集 80-99% 的常態案例)時——
+    修前:被【靜默】換成零序列,SPA/RW 照樣以「vs 基準」姿態報告,同屏 benchmark_compare
+    卻用真基準(兩卡自相矛盾)。修後:同樣 vs 零(引擎端 bench 無日期、無從逐期配對),
+    但【必發】fwer_bench_fallback_zero 警語(帶覆蓋率)+ benchmark_kind 揭露,
+    且 FWER 結果與「明示無基準(vs 零)」逐位一致——揭露與實際計算一致,不再假裝。"""
+    T, K = 250, 5
+    matrix = _noise_matrix(K, T, seed=77)
+    rng = np.random.default_rng(88)
+    bench_partial = (0.0004 + 0.01 * rng.standard_normal(int(T * 0.92))).tolist()  # 230=92%
+    out = analyze({"mode": "matrix", "matrix": matrix, "n_trials": K,
+                   "benchmark_returns": bench_partial, "periods_per_year": 252})
+    hits = [c for c in out["warnings_coded"] if c["code"] == "fwer_bench_fallback_zero"]
+    assert hits, out["warnings"]
+    assert abs(hits[0]["params"]["coverage"] - 0.92) < 0.005
+    assert hits[0]["params"]["bench_len"] == 230
+    assert hits[0]["params"]["n_periods"] == T
+    assert out["fwer"]["benchmark_kind"] == "zero_fallback"
+    # 「行為差異」核心:fallback 的 FWER 結果 == 明示 vs 零(無基準)的 FWER 結果
+    out_zero = analyze({"mode": "matrix", "matrix": matrix, "n_trials": K,
+                        "periods_per_year": 252})
+    assert out_zero["fwer"]["benchmark_kind"] == "zero_no_benchmark"
+    assert not any(c["code"] == "fwer_bench_fallback_zero" for c in out_zero["warnings_coded"])
+    assert out["fwer"]["spa"]["p_value"] == out_zero["fwer"]["spa"]["p_value"]
+    for name in matrix:
+        assert out["fwer"]["per_candidate"][name]["t_stat"] == \
+            out_zero["fwer"]["per_candidate"][name]["t_stat"]
+    # 彙總比較(benchmark_compare)仍用真基準 → 與 FWER 的零基準顯式分流,不再互相假裝
+    assert out["benchmark_compare"] is not None
+
+
+def test_fwer_bench_aligned_uses_real_bench():
+    """基準等長 → 真逐期配對(aligned):結果必須與 vs 零不同(證明真基準有進到 diffs),
+    benchmark_kind='aligned'、覆蓋率 1.0、無 fallback 警語。"""
+    T, K = 250, 5
+    matrix = _noise_matrix(K, T, seed=77)
+    rng = np.random.default_rng(88)
+    bench_full = (0.0004 + 0.01 * rng.standard_normal(T)).tolist()
+    out = analyze({"mode": "matrix", "matrix": matrix, "n_trials": K,
+                   "benchmark_returns": bench_full, "periods_per_year": 252})
+    assert out["fwer"]["benchmark_kind"] == "aligned"
+    assert out["fwer"]["bench_coverage"] == 1.0
+    assert not any(c["code"] == "fwer_bench_fallback_zero" for c in out["warnings_coded"])
+    out_zero = analyze({"mode": "matrix", "matrix": matrix, "n_trials": K,
+                        "periods_per_year": 252})
+    name = next(iter(matrix))
+    assert out["fwer"]["per_candidate"][name]["mean_excess_daily"] != \
+        out_zero["fwer"]["per_candidate"][name]["mean_excess_daily"]
+
+
+def test_auto_block_len_adapts_to_dependence():
+    """自適應 block:iid 資料取短 block(≈T^(1/3));序列相關(AR .5)自動加長。"""
+    rng = np.random.default_rng(0)
+    iid = 0.01 * rng.standard_normal((250, 8))
+    L_iid = jw._auto_block_len(iid)
+    assert 2 <= L_iid <= 8, L_iid
+    eps = 0.01 * rng.standard_normal((250, 8))
+    ar = np.empty_like(eps)
+    ar[0] = eps[0]
+    for t in range(1, 250):
+        ar[t] = 0.5 * ar[t - 1] + eps[t]
+    assert jw._auto_block_len(ar) > L_iid
+
+
+def test_fwer_calibration_diag_exposed_and_explicit_L_honored():
+    """校準診斷全揭露(block_len/spread_corr/studentizer);明示 block_len 仍被尊重。"""
+    T, K = 250, 6
+    matrix = _noise_matrix(K, T, seed=3)
+    out = analyze({"mode": "matrix", "matrix": matrix, "n_trials": K,
+                   "periods_per_year": 252})
+    cal = out["fwer"]["calibration"]
+    assert cal is not None
+    assert cal["studentizer"] == "iid_se"
+    assert cal["spread_corr"] > 1.0
+    assert 2 <= cal["block_len"] <= 25
+    mat = np.column_stack([np.asarray(v) for v in matrix.values()])
+    fw = jw.run_fwer_gates(mat, list(matrix), np.zeros(T), block_len=10)
+    assert fw["calibration"]["block_len"] == 10
+
+
+def test_fwer_null_rejection_rate_calibrated():
+    """R14 MED 釘死(快速版):純雜訊 K=10×T=250、名目 10% 的 RW 家族拒絕率不得回到
+    修前 ~19% 的反保守水位。400 sims × B=400(seed 確定性)修後實測 ~0.13。
+    完整校準(1000 sims × K=20 × B=1000 → 9.9%/4.5%)見 slow 版與 R15 報告。"""
+    n_sims, K, T = 400, 10, 250
+    rej = 0
+    for s in range(n_sims):
+        rng = np.random.default_rng(9_000_017 * s + 3)
+        mat = 0.01 * rng.standard_normal((T, K))
+        fw = jw.run_fwer_gates(mat, [f"c{i}" for i in range(K)], np.zeros(T),
+                               n_bootstrap=400, seed=s + 55)
+        rej += (fw["n_rejected"] > 0)
+    rate = rej / n_sims
+    assert rate <= 0.16, f"FWER 反保守回歸:純雜訊實測 {rate:.3f} > 0.16(名目 0.10)"
+    assert rate >= 0.04, f"FWER 過度保守/檢定死掉:實測 {rate:.3f} < 0.04"
+
+
+@pytest.mark.slow
+def test_fwer_calibration_full_panel_config():
+    """R14 panel 原設定完整重跑:200 sims × K=20 × T=250 × B=1000 純雜訊。
+    修前實測 19.0%(RW@10%)/12.0%(SPA@5%);修後須在名目 ±4.5pp 內
+    (200 sims 的 MC se ~2.1pp,鬆綁到 ±4.5pp 防 flake;千次版見 R15 報告)。"""
+    n_sims, K, T = 200, 20, 250
+    rej = spa05 = 0
+    for s in range(n_sims):
+        rng = np.random.default_rng(1_000_003 * s + 17)
+        mat = 0.01 * rng.standard_normal((T, K))
+        fw = jw.run_fwer_gates(mat, [f"c{i}" for i in range(K)], np.zeros(T),
+                               n_bootstrap=1000, seed=1_000_003 * s + 777_000_018)
+        rej += (fw["n_rejected"] > 0)
+        spa05 += (fw["spa"]["p_value"] < 0.05)
+    assert abs(rej / n_sims - 0.10) <= 0.045, rej / n_sims
+    assert abs(spa05 / n_sims - 0.05) <= 0.045, spa05 / n_sims
+
+
+def test_fwer_power_retained_planted_edge():
+    """校準修復不得閹割檢力:植入日均 0.002(年化夏普 ~3.2)真 edge 的欄,
+    多數 sim 應被 RW 個別拒絕(修後 500 sims 全量實測 77.6%,此處 60 sims 下限 50%)。"""
+    n_sims, K, T = 60, 20, 250
+    hit = 0
+    for s in range(n_sims):
+        rng = np.random.default_rng(4_000_037 * s + 11)
+        mat = 0.01 * rng.standard_normal((T, K))
+        mat[:, 0] += 0.002
+        fw = jw.run_fwer_gates(mat, [f"c{i}" for i in range(K)], np.zeros(T),
+                               n_bootstrap=500, seed=s + 1)
+        hit += fw["per_candidate"]["c0"]["pass"]
+    assert hit / n_sims >= 0.5, f"檢力崩壞:{hit}/{n_sims}"
 
 
 if __name__ == "__main__":

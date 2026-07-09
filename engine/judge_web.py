@@ -212,7 +212,35 @@ def harden_matrix_n_trials(returns: np.ndarray, trial_sharpes: np.ndarray,
 # ===========================================================================
 # 3. FWER 層:circular block bootstrap 底座 + SPA + Romano-Wolf + PBO
 #    (移植 farm/fwer_gates.py,本就純 numpy)
+#
+#    ★R15 校準手術★:R14 panel 實測舊版(block_len=10 固定 × 以 bootstrap se 做
+#    studentize)在純雜訊下反保守 ~2 倍(名目 10% FWER 實測 19.0%、SPA p<0.05 打
+#    12.0%;200 sims × K=20 × T=250)。根因兩個,都修:
+#    (a) studentizer 用了【噪聲大的 bootstrap se】:tb=(boot-dbar)/se 依構造恆為單位
+#        變異,但 t_obs=dbar/se 的真實尺度隨 se 的估計噪聲(block 越長噪聲越大,L=10
+#        時 ~10%+)亂跳,max-of-K 專挑「se 偶然偏小」的候選 → 觀測 max 系統性膨脹。
+#        修:studentizer 改用低噪聲的 iid se(s_k/√T,ddof=1);序列相關仍由 block
+#        bootstrap 的【null 分布形狀】承擔(兩側同除一把尺,尺度自然抵銷,校準不破)。
+#    (b) CBB 變異數估計的有限樣本下偏:E[Var*] ≈ (σ²/T)(1-L/T) → null 分布偏瘦。
+#        修:中心化後的 bootstrap 離差乘 1/√(1-L/T) 校正。
+#    另 block_len 改自適應(簡化 Politis-White:T^(1/3) × AR(1) plug-in 因子),
+#    iid 資料取短 block(估計噪聲小)、序列相關資料自動加長。
+#    修後實測數字見 run_fwer_gates docstring(名目 10% → 9.9%、名目 5% → 4.5%)。
 # ===========================================================================
+def _auto_block_len(diffs: np.ndarray) -> int:
+    """自適應 block 長度(簡化 Politis-White):L = T^(1/3) × ((1+ρ)/(1-ρ))^(2/3),
+    ρ = 各候選 lag-1 自相關的中位數(截尾到 [0, 0.8])。iid 資料 → ρ≈0 → L≈T^(1/3)
+    (短 block、估計噪聲小);序列相關資料 → block 自動加長吃掉相依。clip 到 [2, T/10]。"""
+    T = diffs.shape[0]
+    x = diffs - diffs.mean(axis=0)
+    den = (x * x).sum(axis=0)
+    num = (x[1:] * x[:-1]).sum(axis=0)
+    rho = np.where(den > _SE_FLOOR, num / np.maximum(den, _SE_FLOOR), 0.0)
+    r = float(np.clip(np.median(rho), 0.0, 0.8))
+    L = (T ** (1.0 / 3.0)) * (((1.0 + r) / (1.0 - r)) ** (2.0 / 3.0))
+    return int(np.clip(int(round(L)), 2, max(2, T // 10)))
+
+
 def _circular_block_bootstrap_means(diffs: np.ndarray, n_boot: int, block_len: int,
                                     rng: np.random.Generator) -> np.ndarray:
     T, K = diffs.shape
@@ -233,11 +261,17 @@ def _circular_block_bootstrap_means(diffs: np.ndarray, n_boot: int, block_len: i
     return means
 
 
-def _spa_pvalues(dbar: np.ndarray, boot_means: np.ndarray, se: np.ndarray, T: int) -> dict:
+def _spa_pvalues(dbar: np.ndarray, boot_means: np.ndarray, se: np.ndarray, T: int,
+                 se_null: np.ndarray = None) -> dict:
+    """Hansen SPA p 值。se=studentizer(R15 後為低噪 iid se);se_null=dbar 抽樣 sd 的
+    估計(R15 後為偏差校正過的 bootstrap sd),只用在 mu_c 重心化門檻——該門檻的語意是
+    「輸到統計上顯著才重心化」,得用 dbar 的真實尺度,不能用 studentizer 尺度。"""
+    if se_null is None:
+        se_null = se
     t_stat = dbar / se
     t_obs = float(max(0.0, t_stat.max()))
     loglog = float(np.sqrt(2.0 * np.log(np.log(T)))) if T > 15 else 0.0
-    mu_c = np.where(dbar <= -se * loglog, dbar, 0.0)
+    mu_c = np.where(dbar <= -se_null * loglog, dbar, 0.0)
     centered = boot_means - dbar
     b = boot_means.shape[0]
     out = {}
@@ -317,16 +351,29 @@ def pbo_cscv(values: np.ndarray, n_blocks: int = 12) -> dict:
 
 
 def run_fwer_gates(matrix_values: np.ndarray, names: list, bench: np.ndarray,
-                   alpha=0.10, n_bootstrap=1000, block_len=10, seed=20260707,
+                   alpha=0.10, n_bootstrap=1000, block_len=None, seed=20260707,
                    min_obs=100, n_blocks_pbo=12) -> dict:
     """對一批候選跑 Romano-Wolf(逐候選)+ SPA + PBO(套件級)。matrix_values=(T,K),
-    bench=(T,) 同期基準報酬。缺基準時傳 0 序列(=絕對報酬 vs 0)。"""
+    bench=(T,) 同期基準報酬。缺基準時傳 0 序列(=絕對報酬 vs 0)。
+
+    block_len=None(預設)→ 自適應(_auto_block_len);給定數字則照用(重現舊行為用)。
+
+    ★R15 校準(見第 3 節節首註解)★:studentizer 改低噪 iid se、CBB 離差乘
+    1/√(1-L/T) 校正、block 長自適應。修後實測(校準實驗,seed 可重現):
+      純雜訊 1000 sims × K=20 × T=250:名目 10% RW FWER → 實測 9.9%(修前 19.0%);
+        名目 5% SPA → 實測 4.5%(修前 12.0%)。
+      T=120:9.8%/5.0%;K=50:8.6%/4.4%;AR(1)=0.15:11.2%/5.9%;
+      AR(1)=0.30:12.5%/7.5%(block bootstrap 有限 T 固有殘餘,強序列相關下仍偏鬆
+        ~1-3pp——展示層文案據此只講「已校準(誤差 ±3pp 內)」,不宣稱精確)。
+      檢力保留:植入年化夏普 ~3.2 真 edge → 77.6% 偵測(500 sims)。
+    回傳 base["calibration"] 揭露所用 block_len / 校正因子 / studentizer。"""
     K = matrix_values.shape[1]
     base = {"computed": False, "alpha": alpha, "n_candidates": K,
             "per_candidate": {}, "n_rejected": 0,
             "spa": {"p_value": float("nan"), "p_lower": float("nan"),
                     "p_upper": float("nan"), "t_max": float("nan"), "best": None},
-            "pbo": {"pbo": float("nan"), "n_combinations": 0, "n_strategies": K}}
+            "pbo": {"pbo": float("nan"), "n_combinations": 0, "n_strategies": K},
+            "calibration": None}
     T = matrix_values.shape[0]
     if K < 1 or T < min_obs:
         base["reason"] = f"對齊後樣本 {T} < min_obs {min_obs}" if K >= 1 else "無候選"
@@ -334,12 +381,20 @@ def run_fwer_gates(matrix_values: np.ndarray, names: list, bench: np.ndarray,
         return base
 
     diffs = matrix_values - bench[:, None]
+    L = int(block_len) if block_len else _auto_block_len(diffs)
+    L = max(1, min(L, T))
     rng = np.random.default_rng(seed)
-    boot_means = _circular_block_bootstrap_means(diffs, n_bootstrap, block_len, rng)
+    boot_means = _circular_block_bootstrap_means(diffs, n_bootstrap, L, rng)
     dbar = diffs.mean(axis=0)
-    se = np.maximum(boot_means.std(axis=0, ddof=1), _SE_FLOOR)
+    # (b) CBB 變異數有限樣本下偏校正:E[Var*]≈(σ²/T)(1-L/T) → 離差乘 1/√(1-L/T)。
+    spread_corr = float(1.0 / np.sqrt(max(1.0 - L / T, 0.25)))
+    boot_means = dbar + (boot_means - dbar) * spread_corr
+    # (a) studentizer:低噪 iid se(兩側同除,序列相關由 bootstrap null 形狀承擔)。
+    se = np.maximum(diffs.std(axis=0, ddof=1) / np.sqrt(T), _SE_FLOOR)
+    # dbar 抽樣 sd 的最佳估計(校正後 bootstrap sd)→ 只給 SPA 的 mu_c 重心化門檻。
+    se_null = np.maximum(boot_means.std(axis=0, ddof=1), _SE_FLOOR)
 
-    spa = _spa_pvalues(dbar, boot_means, se, T)
+    spa = _spa_pvalues(dbar, boot_means, se, T, se_null=se_null)
     spa["best"] = names[int(np.argmax(dbar / se))]
     p_adj = _romano_wolf_adj_p(dbar, boot_means, se)
     reject = p_adj <= alpha
@@ -349,7 +404,9 @@ def run_fwer_gates(matrix_values: np.ndarray, names: list, bench: np.ndarray,
            for k in range(K)}
     base.update({"computed": True, "reason": "", "n_obs": int(T), "spa": spa,
                  "pbo": pbo_cscv(matrix_values, n_blocks_pbo),
-                 "per_candidate": per, "n_rejected": int(reject.sum())})
+                 "per_candidate": per, "n_rejected": int(reject.sum()),
+                 "calibration": {"block_len": int(L), "spread_corr": spread_corr,
+                                 "studentizer": "iid_se", "n_bootstrap": int(n_bootstrap)}})
     return base
 
 
@@ -812,17 +869,46 @@ def analyze(payload: dict) -> dict:
     perm = permutation_null(returns, ppy, n_perm=n_perm_eff)
 
     # ---- PBO / FWER(僅 matrix)----
+    # ★R15 修:基準對齊不再靜默(修前:bench 長度 < 矩陣期數——前端日期交集覆蓋 80-99%
+    #   時常態發生——會被【靜默】換成零序列,SPA/RW 名義上「vs 基準」實際 vs 絕對報酬,
+    #   同一報告的 benchmark_compare 卻用真基準,兩卡自相矛盾)。
+    #   引擎收到的 bench 已無日期(前端做過日期交集才送),長度不符時無從知道缺哪幾期、
+    #   與矩陣逐期配對不可能 → 誠實三態:
+    #   - aligned:bench 期數 ≥ 矩陣期數 → 逐期配對,真 vs 基準。
+    #   - zero_fallback:bench 較短無法配對 → 改 vs 零基準(絕對報酬)誠實執行,
+    #     【必發】fwer_bench_fallback_zero 警語(帶覆蓋率),SPA/RW 卡須據此揭露。
+    #   - zero_no_benchmark:使用者沒選基準 → vs 零基準(原本文件化行為),
+    #     以 benchmark_kind 揭露讓前端措辭正確(「絕對報酬」而非「贏基準」)。
     pbo_out = None
     fwer_out = None
     if mode == "matrix" and mat is not None and mat.shape[1] >= 2:
         pbo_out = pbo_cscv(mat, 12)
-        bench_arr = (np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)[:mat.shape[0]]
-                     if bench_ret is not None else np.zeros(mat.shape[0]))
-        if bench_arr.size < mat.shape[0]:
-            bench_arr = np.zeros(mat.shape[0])
+        T_mat = mat.shape[0]
+        fwer_bench_kind = "zero_no_benchmark"
+        fwer_bench_cov = None
+        if bench_ret is not None:
+            b_arr = np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)
+            if b_arr.size >= T_mat:
+                bench_arr = b_arr[:T_mat]
+                fwer_bench_kind = "aligned"
+                fwer_bench_cov = 1.0
+            else:
+                fwer_bench_cov = float(b_arr.size) / float(T_mat) if T_mat else 0.0
+                bench_arr = np.zeros(T_mat)
+                fwer_bench_kind = "zero_fallback"
+                _warn(f"SPA/Romano-Wolf 的基準無法逐期配對:基準 {b_arr.size} 期 vs 矩陣 "
+                      f"{T_mat} 期(覆蓋 {fwer_bench_cov*100:.0f}%,引擎端無日期可做共同索引"
+                      "對齊)。此檢定已改為 vs 絕對報酬(零基準)誠實執行——與「對照基準」卡"
+                      "(用真基準、各自彙總比較)語意不同,請分開解讀,勿當作「贏過基準」。",
+                      "fwer_bench_fallback_zero", coverage=round(fwer_bench_cov, 4),
+                      bench_len=int(b_arr.size), n_periods=int(T_mat))
+        else:
+            bench_arr = np.zeros(T_mat)
         fw = run_fwer_gates(mat, names, bench_arr, n_bootstrap=n_boot_eff, n_blocks_pbo=12)
         fwer_out = {"spa": fw["spa"], "per_candidate": fw["per_candidate"],
-                    "n_rejected": fw["n_rejected"]}
+                    "n_rejected": fw["n_rejected"],
+                    "benchmark_kind": fwer_bench_kind, "bench_coverage": fwer_bench_cov,
+                    "calibration": fw.get("calibration")}
         if not fw["computed"]:
             _warn(f"FWER 未計算:{fw.get('reason', '樣本不足')}(需 ≥100 期)。",
                   "fwer_not_computed", n_obs=int(fw.get("n_obs", 0)), min_obs=100)
