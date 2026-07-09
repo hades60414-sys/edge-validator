@@ -377,6 +377,99 @@ def test_dsr_matches_scipy_reference():
 
 
 # ===========================================================================
+# 5.5 結構化 reason codes(reasons_coded / red_flags_coded / warnings_coded)
+#     ——加欄向後相容:zh 字串不變,coded 與 zh 逐位 1:1,對應同一輸入確定性。
+# ===========================================================================
+def _assert_coded_shape(coded):
+    for item in coded:
+        assert isinstance(item, dict) and set(item) == {"code", "params"}
+        assert isinstance(item["code"], str) and item["code"]
+        assert isinstance(item["params"], dict)
+
+
+def test_reasons_coded_alignment_and_shape():
+    """coded 欄與 zh 字串欄長度 1:1;每項 {code, params};已知情境命中預期 code。"""
+    rng = np.random.default_rng(7)
+    n = 400
+    out = analyze({"mode": "returns", "returns": (0.011 * rng.standard_normal(n)).tolist(),
+                   "benchmark_returns": (0.011 * rng.standard_normal(n)).tolist(),
+                   "n_trials": 200, "periods_per_year": 252})
+    v = out["verdict"]
+    assert len(v["reasons_coded"]) == len(v["reasons"])
+    assert len(v["red_flags_coded"]) == len(v["red_flags"])
+    assert len(out["warnings_coded"]) == len(out["warnings"])
+    _assert_coded_shape(v["reasons_coded"] + v["red_flags_coded"] + out["warnings_coded"])
+    codes = [c["code"] for c in v["reasons_coded"]]
+    # 高 n_trials 雜訊:DSR 崩、n_trials 懲罰、收尾三態之一必在
+    assert "many_trials_penalty" in codes
+    assert codes[-1] in ("closing_likely_real", "closing_inconclusive", "closing_likely_overfit")
+    # params 帶原始數值(前端模板格式化用)
+    dsr_items = [c for c in v["reasons_coded"] if c["code"].startswith("dsr_")]
+    assert dsr_items and all(("dsr" in c["params"] or c["code"] == "dsr_not_computable")
+                             for c in dsr_items)
+
+
+def test_reasons_coded_is_additive_not_mutating():
+    """加 coded 欄不得改變既有值:同輸入,舊契約欄位(含 zh reasons 全文)完全不變、
+    同輸入同輸出(確定性)。"""
+    import json as _json
+    rng = np.random.default_rng(2)
+    n = 300
+    payload = {"mode": "returns",
+               "returns": (0.0008 + 0.012 * rng.standard_normal(n)).tolist(),
+               "benchmark_returns": (0.0003 + 0.012 * rng.standard_normal(n)).tolist(),
+               "cost_bps_per_turnover": 10.0,
+               "turnover": np.abs(0.2 * rng.standard_normal(n)).tolist(),
+               "periods_per_year": 252}
+    o1 = analyze(_json.loads(_json.dumps(payload)))
+    o2 = analyze(_json.loads(_json.dumps(payload)))
+
+    def strip(o):
+        if isinstance(o, dict):
+            return {k: strip(x) for k, x in o.items()
+                    if k not in ("reasons_coded", "red_flags_coded", "warnings_coded")}
+        if isinstance(o, list):
+            return [strip(x) for x in o]
+        return o
+    assert _json.dumps(strip(o1), sort_keys=True, ensure_ascii=False, allow_nan=True) \
+        == _json.dumps(strip(o2), sort_keys=True, ensure_ascii=False, allow_nan=True)
+    assert _json.dumps(o1["verdict"]["reasons_coded"], sort_keys=True) \
+        == _json.dumps(o2["verdict"]["reasons_coded"], sort_keys=True)
+    # zh reasons 是原本的人話字串(含全形標點),證明沒被 coded 化取代
+    assert any("通縮夏普" in r for r in o1["verdict"]["reasons"])
+
+
+def test_warnings_coded_paths():
+    """warnings_coded 各路徑:短樣本 / 空輸入 / matrix 高欄數檢定力警語。"""
+    # 短樣本
+    out = analyze({"mode": "returns", "returns": [0.01, -0.01, 0.02, 0.0, 0.01]})
+    assert any(c["code"] == "short_sample" for c in out["warnings_coded"])
+    # 空輸入(錯誤路徑也帶 coded)
+    bad = analyze({"mode": "returns", "returns": []})
+    assert bad["ok"] is False
+    assert [c["code"] for c in bad["warnings_coded"]] == ["returns_empty"]
+    assert [c["code"] for c in bad["verdict"]["reasons_coded"]] == ["no_data"]
+    # 高欄數 × 短樣本 → high_dim_low_power(沿用 R5 掃描 seed)
+    K, N, s = 100, 60, 70
+    rng = np.random.default_rng(s * 100003 + K * 7 + N)
+    matrix = {f"c{i}": (0.012 * rng.standard_normal(N)).tolist() for i in range(K)}
+    out2 = analyze({"mode": "matrix", "matrix": matrix, "n_trials": 1, "periods_per_year": 252})
+    assert any(c["code"] == "high_dim_low_power" and c["params"]["n_cols"] == K
+               for c in out2["warnings_coded"])
+
+
+def test_capped_escape_reason_coded():
+    """封頂逃逸情境:reason/red_flag 皆帶對應 code。"""
+    K, N, s = 50, 120, 30
+    rng = np.random.default_rng(s * 100003 + K * 7 + N)
+    matrix = {f"c{i}": (0.012 * rng.standard_normal(N)).tolist() for i in range(K)}
+    out = analyze({"mode": "matrix", "matrix": matrix, "n_trials": 1, "periods_per_year": 252})
+    v = out["verdict"]
+    assert any(c["code"] == "capped_escape_fail_closed" for c in v["reasons_coded"])
+    assert any(c["code"] == "capped_escape" for c in v["red_flags_coded"])
+
+
+# ===========================================================================
 # 邊界:空輸入 / 極短序列不崩
 # ===========================================================================
 def test_empty_and_short_inputs():
@@ -385,6 +478,50 @@ def test_empty_and_short_inputs():
     out = analyze({"mode": "returns", "returns": [0.01, -0.01, 0.02, 0.0, 0.01]})
     assert out["ok"] is True  # 短序列給出結果 + warning
     assert any("樣本" in w for w in out["warnings"])
+
+
+# ===========================================================================
+# 日內頻率:_infer_ppy 日內化 + 長序列效能守衛
+# ===========================================================================
+def test_infer_ppy_intraday_tw_1m():
+    """台股 1 分 K(20 交易日 × 266 bar,跳過週末)→ ppy ≈ 266 × ~280 ≈ 7 萬級,非 252/35040。"""
+    dates = []
+    d = pd.Timestamp("2026-06-01")  # 週一
+    n_days = 0
+    while n_days < 20:
+        if d.dayofweek < 5:
+            base = d + pd.Timedelta(hours=9)
+            dates.extend((base + pd.Timedelta(minutes=m)).strftime("%Y-%m-%d %H:%M")
+                         for m in range(266))
+            n_days += 1
+        d += pd.Timedelta(days=1)
+    ppy = jw._infer_ppy(dates, None)
+    assert 55000 <= ppy <= 78000, ppy
+    # 顯式 periods_per_year 覆寫永遠優先
+    assert jw._infer_ppy(dates, 65000) == 65000.0
+    # 日頻不受影響(回歸)
+    daily = pd.date_range("2024-01-01", periods=300, freq="B")
+    assert 240 <= jw._infer_ppy([t.strftime("%Y-%m-%d") for t in daily], None) <= 264
+
+
+def test_infer_ppy_intraday_crypto_1m():
+    """加密 1m 連續 3 天(24/7)→ 1440 bar/日 × 365 = 525,600(舊 clip 35040 已拆)。"""
+    idx = pd.date_range("2026-01-01", periods=3 * 1440, freq="min")
+    ppy = jw._infer_ppy([t.strftime("%Y-%m-%d %H:%M") for t in idx], None)
+    assert 500000 <= ppy <= 545000, ppy
+
+
+def test_long_series_guard_reduces_resamples():
+    """>50k 期:permutation 降 500、帶 long_series_guard warning;≤50k 不動(n_perm=2000)。"""
+    rng = np.random.default_rng(7)
+    r = (0.0004 * rng.standard_normal(60000)).tolist()
+    out = analyze({"mode": "returns", "returns": r, "periods_per_year": 65000})
+    assert out["ok"] is True
+    assert out["permutation_null"]["n_perm"] == 500
+    assert any(c["code"] == "long_series_guard" for c in out["warnings_coded"])
+    out2 = analyze({"mode": "returns", "returns": r[:1000], "periods_per_year": 65000})
+    assert out2["permutation_null"]["n_perm"] == 2000
+    assert not any(c["code"] == "long_series_guard" for c in out2["warnings_coded"])
 
 
 if __name__ == "__main__":

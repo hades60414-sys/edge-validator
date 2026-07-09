@@ -16,6 +16,10 @@
     })();
   </script>
   <meta name="color-scheme" content="dark">
+  <!-- 效能感知:提早跟 Pyodide CDN 握手 + 預載入口 script,縮短首載 ~15s 中的網路等待段 -->
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
+  <link rel="preload" as="script" href="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js">
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2307090c'/%3E%3Cpath d='M4 22 L12 12 L18 18 L28 6' fill='none' stroke='%2338e1c4' stroke-width='2.5'/%3E%3C/svg%3E">
 </head>
@@ -73,7 +77,7 @@
       </div>
 
       <div class="upload-row">
-        <label class="drop" id="drop">
+        <label class="drop" id="drop" tabindex="0" role="button">
           <input type="file" id="fileInput" accept=".csv,.txt,text/csv">
           <svg class="xicon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M24 32V10M24 10l-7 7M24 10l7 7"/>
@@ -102,7 +106,7 @@
       </div>
 
       <!-- ===================== 2. 參數 ===================== -->
-      <div class="section-head" style="margin-top:44px">
+      <div class="section-head" id="calibrate" style="margin-top:44px">
         <span class="step-no" data-i18n="step02_no">STEP 02 / 校準</span>
         <h2 data-i18n="step02_h">設定裁判參數</h2>
         <p data-i18n="step02_p">最關鍵的是「你試了幾種參數」——這決定了通縮夏普(DSR)要扣掉多少運氣成分。誠實填,別自欺。</p>
@@ -152,7 +156,7 @@
 
       <!-- Pyodide 載入條 -->
       <div class="loader" id="loader">
-        <div class="msg"><span class="dot warm"></span><span id="loaderMsg" data-i18n="loader_init">正在載入裁判引擎(Pyodide + NumPy/Pandas,約 10–15MB)…</span></div>
+        <div class="msg"><span class="dot warm"></span><span id="loaderMsg" data-i18n="loader_init">正在載入裁判引擎(Pyodide + NumPy/Pandas,約 10–15MB)…</span><span class="eta" id="loaderEta"></span></div>
         <div class="bar indeterminate" id="loaderBar"><span id="loaderFill"></span></div>
         <div class="loader-steps" id="loaderSteps" aria-hidden="true">
           <span class="lstep" data-step="0" data-i18n="loader_step0">啟動 Python</span>

@@ -311,6 +311,12 @@ section { padding: 54px 0; }
   transition: border-color .2s, background .2s, transform .1s;
 }
 .drop:hover { border-color: var(--scan-dim); }
+/* 鍵盤可達性:Tab 聚焦上傳區時給明確 focus 環(Enter/Space 可開檔) */
+.drop:focus-visible {
+  outline: 2px solid var(--scan);
+  outline-offset: 3px;
+  border-color: var(--scan-dim);
+}
 .drop.dragover {
   border-color: var(--scan);
   background: radial-gradient(120% 100% at 50% 0%, var(--scan-glow), transparent 60%), var(--bg-2);
@@ -542,6 +548,15 @@ section { padding: 54px 0; }
 .loader.show { display: block; }
 .loader .msg { display: flex; align-items: center; gap: 10px; }
 .loader .msg .dot { width:7px; height:7px; }
+/* 效能感知:預估剩餘秒數(右端、mono、低調) */
+.loader .msg .eta {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .loader .bar {
   margin-top: 12px;
   height: 3px;

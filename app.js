@@ -105,6 +105,8 @@ const STRINGS = {
     loader_step2: '注入引擎',
     loader_step3: '自我測試',
     loader_foot: '首次會多花幾秒下載數值套件,之後由瀏覽器快取,一切都在你本機跑。',
+    loader_eta: (s) => `預估約再 ${s} 秒`,
+    loader_eta_soon: '快好了…',
 
     // —— 判決書 ——
     verdict_no: 'VERDICT / 判決書',
@@ -384,6 +386,8 @@ const STRINGS = {
     loader_step2: 'Inject engine',
     loader_step3: 'Self-test',
     loader_foot: 'The first run spends a few extra seconds downloading the numeric stack; after that the browser caches it, and everything runs on your machine.',
+    loader_eta: (s) => `~${s}s to go`,
+    loader_eta_soon: 'almost done…',
 
     // —— verdict ——
     verdict_no: 'VERDICT',
@@ -567,7 +571,7 @@ const STRINGS = {
     pt_perm_na: '<b>Beats random shuffling?</b> Sample too short to run the permutation test.',
     // ② DSR
     pt_dsr_trial_multi: (n) => `after stripping out the luck of trying ${n} parameter sets`,
-    pt_dsr_trial_single: 'you only handed in one curve (treated as no tuning)',
+    pt_dsr_trial_single: 'only one curve handed in (treated as no tuning)',
     pt_dsr_high: (clause, prob) => `<b>Still holds after removing "many tries" luck? Yes.</b> With ${clause}, the probability of a real edge is about ${prob} — high confidence.`,
     pt_dsr_mid: (clause, prob) => `<b>Still holds after removing "many tries" luck? Barely, above the noise floor.</b> With ${clause}, the probability of a real edge is about ${prob} (past the 60% noise floor, but short of 95% high confidence).`,
     pt_dsr_low: (clause, prob) => `<b>Still holds after removing "many tries" luck? No.</b> With ${clause}, the probability of a real edge drops to about ${prob} — this pretty number is mostly cherry-picked luck.`,
@@ -596,6 +600,49 @@ const STRINGS = {
     vm_overfit_sub: 'Several metrics show this curve is most likely noise fitted into a shape. Finding it before you lose real money is what this machine is worth.',
     vm_incon_text: 'Inconclusive',
     vm_incon_sub: 'The evidence is not enough to call it real or fake. Usually the sample is too short, the signal not clean enough, or it sits right on the threshold. Gather more samples or run a forward test before deciding.',
+
+    // —— engine reason codes → EN 渲染模板 ——
+    // 引擎回 reasons_coded / red_flags_coded / warnings_coded([{code, params}],與 zh 字串
+    // 逐位 1:1)。EN 模式用這些模板渲染;zh 模式直接用引擎的中文字串(單一真源)。
+    // 數字格式化刻意跟引擎 zh 字串同精度(dsr/pbo/p/sharpe 兩位、超額 CAGR ±一位、集中度整數%)。
+    // reasons(rc_)
+    rc_dsr_high_confidence: (p) => `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: even after correcting for the multiple testing of ${p.n_trials} parameter trials, the probability of a real edge stays high.`,
+    rc_dsr_above_noise_floor: (p) => `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: above the 0.60 noise floor, but confidence is not top-tier — don't treat it as ironclad.`,
+    rc_dsr_below_noise_floor: (p) => `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)} < 0.60: after the multiple-testing correction, the odds of a real edge are under half — highly likely noise.`,
+    rc_dsr_not_computable: () => 'DSR could not be computed (insufficient sample or variance); excluded from the verdict.',
+    rc_capped_escape_fail_closed: (p) => `Noise-hardening scaled the trial count to its cap (${p.n_trials}) and the Deflated Sharpe still hasn't dropped below the 0.60 noise floor — this usually means too many columns / too short a sample, so this in-sample winner is statistically indistinguishable from one lucky draw of noise. The engine fails closed: overfitting cannot be ruled out, so it is not called real.`,
+    rc_pbo_high: (p) => `Probability of backtest overfitting (PBO)=${fmt(p.pbo, 2)} > 0.50: the in-sample best pick usually lands near the bottom out-of-sample — a classic overfitting signature.`,
+    rc_pbo_ok: (p) => `Probability of backtest overfitting (PBO)=${fmt(p.pbo, 2)} ≤ 0.50: the in-sample winner shows no systematic collapse out-of-sample.`,
+    rc_perm_noise: (p) => `Permutation test p=${fmt(p.p, 2)} > 0.50: after shuffling the return order, more than half of the random versions match your real Sharpe — no genuine signal found.`,
+    rc_perm_pass: (p) => `Permutation test p=${fmt(p.p, 2)}: your real Sharpe beats 95% of the shuffled versions — the time-series structure carries information.`,
+    rc_perm_below_threshold: (p) => `Permutation test p=${fmt(p.p, 2)}: didn't clear the random p95 threshold; the signal isn't clean enough.`,
+    rc_cost_x3_positive: (p) => `Sharpe after ×3 cost stress = ${fmt(p.sharpe, 2)}, still positive: some buffer against trading costs.`,
+    rc_cost_x3_negative: (p) => `Sharpe after ×3 cost stress = ${fmt(p.sharpe, 2)} ≤ 0: slightly conservative costs flip it negative — friction may eat the whole edge.`,
+    rc_bench_beaten: (p) => `Sharpe beats the benchmark${isNum(p.excess_cagr) ? ` (excess CAGR ${fmtSigned(p.excess_cagr * 100, 1)}%)` : ''}: adds value over buy-and-hold.`,
+    rc_bench_not_beaten: () => "Sharpe does not beat the benchmark: no clear advantage over buy-and-hold — first ask whether all this extra trading is worth it.",
+    rc_concentration_high: (p) => `Return concentration=${fmtPct(p.concentration, 0)}: the single best period contributes close to half (or more) of the returns — performance rides on a few spikes; fragile.`,
+    rc_concentration_ok: (p) => `Return concentration=${fmtPct(p.concentration, 0)}: returns are spread fairly evenly, not riding on a few bars.`,
+    rc_many_trials_penalty: (p) => `You tried ${p.n_trials} parameter sets: the more you try, the higher the odds of hitting a pretty result by luck — points deducted accordingly.`,
+    rc_trials_corrected: (p) => `You tried ${p.n_trials} parameter sets: multiple-testing correction (DSR) has been applied.`,
+    rc_sample_short: (p) => `Only ${p.n_periods} periods in the sample: statistical power is weak, so discount every conclusion.`,
+    rc_closing_likely_real: () => 'Important: passing these tests only means "no obvious overfitting was found" — it does not guarantee future profit. Before real money, always walk-forward validate and live-test at small size.',
+    rc_closing_inconclusive: () => "Inconclusive: the evidence isn't enough to call it real or fake. Gather more samples or run a forward test before deciding.",
+    rc_closing_likely_overfit: () => "Reminder: even if some metrics look good, the red flags above say this strategy is most likely an overfit artifact — don't bet real money on it.",
+    rc_no_data: () => 'No data.',
+    // red flags(rf_)
+    rf_dsr_below_noise_floor: (p) => `DSR=${fmt(p.dsr, 2)} is below the 0.60 noise floor.`,
+    rf_capped_escape: () => 'Capped escape: with the trial count scaled to its cap, DSR still sits above the noise floor — too many columns / too short a sample to rule out overfitting.',
+    rf_pbo_high: (p) => `PBO=${fmt(p.pbo, 2)} > 0.50.`,
+    rf_perm_noise: (p) => `Permutation p=${fmt(p.p, 2)} > 0.50.`,
+    rf_cost_x3_negative: () => 'Sharpe turns negative after ×3 cost stress.',
+    rf_concentration_high: (p) => `Single-period concentration ${fmtPct(p.concentration, 0)} ≥ 40%.`,
+    rf_sample_short: (p) => `Sample too short (only ${p.n_periods} periods).`,
+    // warnings(rw_)
+    rw_short_sample: (p) => `Only ${p.n} periods — statistical power is weak; treat the conclusions as indicative only.`,
+    rw_high_dim_low_power: (p) => `Heads up: you searched ${p.n_cols} columns over a ${p.n_periods}-period sample (columns ≥ periods). Here even a "passing" Deflated Sharpe is statistically hard to tell apart from one lucky noise winner — the pass has weak power. Re-check with a longer sample or a walk-forward test; don't take it at face value.`,
+    rw_fwer_not_computed: (p) => `FWER gates not computed: aligned sample has ${p.n_obs} periods, below the required ${p.min_obs}.`,
+    rw_matrix_empty: () => 'Matrix mode, but the matrix is empty.',
+    rw_returns_empty: () => 'Returns mode, but the returns series is empty.',
   },
 };
 
@@ -606,6 +653,21 @@ function t(key, ...args) {
   if (v === undefined) v = STRINGS['zh-tw'][key];
   if (v === undefined) return key;
   return typeof v === 'function' ? v(...args) : v;
+}
+
+// codedStrings — 引擎結構化 reason codes → 當前語言字串陣列。
+// 引擎保證 coded 與 raw(zh 字串)逐位 1:1:EN 模式且有對應模板 → 用 code+params 渲染英文;
+// zh 模式 / 缺 code / 缺模板 → 一律退回引擎原字串(向後相容,永不丟資訊)。
+function codedStrings(coded, raw, prefix) {
+  const rawArr = Array.isArray(raw) ? raw : [];
+  if (State.lang !== 'en' || !Array.isArray(coded) || coded.length !== rawArr.length) return rawArr;
+  return coded.map((c, i) => {
+    const fallback = rawArr[i] != null ? String(rawArr[i]) : String((c && c.code) || '');
+    if (!c || !c.code) return fallback;
+    const key = prefix + c.code;
+    if (Object.prototype.hasOwnProperty.call(STRINGS.en, key)) return t(key, c.params || {});
+    return fallback;
+  });
 }
 
 // applyStaticI18n — 掃 [data-i18n]/[data-i18n-html]/[data-i18n-title] 節點,套當前語言。
@@ -702,6 +764,18 @@ async function ensureEngine() {
   }
   State.loading = true;
   const loader = $('loader');
+  // 效能感知:各階段進場時的「預估剩餘秒數」(首載冷快取實測 ~15s;之後快取命中會提早完成,
+  // ETA 只會跳快不會拖慢——寧可低承諾高兌現)。
+  const STAGE_ETA = [14, 9, 2.5, 1.5];
+  let etaDeadline = 0;
+  const etaNode = $('loaderEta');
+  const renderEta = () => {
+    if (!etaNode) return;
+    const remain = Math.ceil((etaDeadline - performance.now()) / 1000);
+    etaNode.textContent = remain >= 2 ? t('loader_eta', remain) : t('loader_eta_soon');
+  };
+  const etaTimer = etaNode ? setInterval(renderEta, 500) : null;
+  const stopEta = () => { if (etaTimer) clearInterval(etaTimer); if (etaNode) etaNode.textContent = ''; };
   // 步驟燈:done=已完成、active=進行中,讓等待有節奏、可預期
   const setStep = (idx) => {
     const steps = document.querySelectorAll('#loaderSteps .lstep');
@@ -709,6 +783,10 @@ async function ensureEngine() {
       s.classList.toggle('done', i < idx);
       s.classList.toggle('active', i === idx);
     });
+    if (idx < STAGE_ETA.length) {
+      etaDeadline = performance.now() + STAGE_ETA[idx] * 1000;
+      renderEta();
+    }
   };
   const setMsg = (m, step) => {
     $('loaderMsg').textContent = m;
@@ -760,6 +838,7 @@ json.dumps({"ok": _r["ok"], "verdict": _r["verdict"]["overall"]})
     loader.classList.remove('show');
     return false;
   } finally {
+    stopEta();
     State.loading = false;
   }
 }
@@ -908,13 +987,15 @@ function looksLikeDate(s) {
 // 3d. 正規化日期 → ISO(含民國年 → 西元)
 function normalizeDate(s) {
   s = String(s).trim();
-  let m = s.match(/^(\d{3,4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  // 日內時間戳(YYYY-MM-DD HH:MM[:SS])保留時間 → 引擎 _infer_ppy 才認得出日內步距(1 分 K 等)。
+  let m = s.match(/^(\d{3,4})[-/.](\d{1,2})[-/.](\d{1,2})([T ]\d{1,2}:\d{2}(?::\d{2})?)?/);
   if (m) {
     let y = parseInt(m[1], 10);
     if (m[1].length === 3 || (y < 1911 && y > 1)) y += 1911; // 民國年(3 位或小數值)
     const mo = String(parseInt(m[2], 10)).padStart(2, '0');
     const d = String(parseInt(m[3], 10)).padStart(2, '0');
-    return `${y}-${mo}-${d}`;
+    const tm = m[4] ? ' ' + m[4].replace(/^[T ]/, '') : '';
+    return `${y}-${mo}-${d}${tm}`;
   }
   m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
@@ -937,7 +1018,9 @@ function navToReturns(vals) {
 function detectSeriesKind(vals) {
   const clean = vals.filter(isNum);
   if (clean.length < 3) return 'returns';
-  const absMax = Math.max(...clean.map(Math.abs));
+  // 迴圈算 absMax:日內 CSV 可達數十萬列,Math.max(...arr) 展開會爆呼叫堆疊(RangeError)。
+  let absMax = 0;
+  for (const v of clean) { const a = Math.abs(v); if (a > absMax) absMax = a; }
   const anyNeg = clean.some(v => v < 0);
   const allPos = clean.every(v => v > 0);
   // 單調性(允許少量回檔):升序步數比例
@@ -979,7 +1062,9 @@ function parseCSV(text, srcName) {
   if (firstNumericCount === 0) { header = rows[0]; body = rows.slice(1); }
   if (body.length < 2) throw new Error(t('perr_body_few'));
 
-  const nCols = Math.max(...body.map(r => r.length));
+  // 迴圈版(勿用 Math.max(...spread):數十萬列(如加密 1m 一年 52.5 萬列)會 RangeError 爆棧)
+  let nCols = 0;
+  for (let i = 0; i < body.length; i++) { if (body[i].length > nCols) nCols = body[i].length; }
 
   // ---- 情況 A:單欄 → returns 或 nav ----
   if (nCols === 1) {
@@ -1157,7 +1242,8 @@ _out  # 回傳 dict,交給 JS 用 toJs 轉
     log('analyze 回傳:', out);
 
     if (!out.ok) {
-      showError(t('err_analyze_fail', out.warnings ? out.warnings.join('；') : t('err_analyze_unknown')));
+      const whys = codedStrings(out.warnings_coded, out.warnings, 'rw_');
+      showError(t('err_analyze_fail', whys.length ? whys.join(State.lang === 'en' ? '; ' : '；') : t('err_analyze_unknown')));
       return;
     }
     // 記住結果 + 當時 parsed,供切語言時純呈現層重繪(數字不變、只換文字)
@@ -1166,7 +1252,7 @@ _out  # 回傳 dict,交給 JS 用 toJs 轉
     State.lastBenchNote = benchNote;
     renderResults(out, p, benchNote);
     $('results').classList.add('show');
-    $('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    smoothScrollTo($('results'));  // 判決出爐 → 自動捲到判決卡(尊重 reduced-motion)
   } catch (e) {
     warn('runAnalysis 例外:', e);
     showError(t('err_runtime', escapeHtml(String(e.message || e))));
@@ -1349,16 +1435,16 @@ function renderResults(out, parsed, benchNote) {
   animateNumber($('scoreNum'), score, 900, 0);
   requestAnimationFrame(() => { $('gaugeFill').style.width = Math.max(2, score) + '%'; });
 
-  // reasons
+  // reasons(EN 模式用引擎 reason codes 渲染英文;zh 用引擎原字串)
   const rl = $('reasonsList'); rl.innerHTML = '';
-  (v.reasons || []).forEach(r => {
+  codedStrings(v.reasons_coded, v.reasons, 'rc_').forEach(r => {
     rl.appendChild(el('li', null,
       `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg><span>${escapeHtml(r)}</span>`));
   });
 
-  // red flags
+  // red flags(同 reasons:EN 走 codes)
   const flagsBox = $('flagsBox'); const fl = $('flagsList'); fl.innerHTML = '';
-  const flags = v.red_flags || [];
+  const flags = codedStrings(v.red_flags_coded, v.red_flags, 'rf_');
   if (flags.length) {
     flagsBox.classList.remove('hidden');
     $('reasonsGrid').classList.add('has-flags');
@@ -1371,9 +1457,9 @@ function renderResults(out, parsed, benchNote) {
     $('reasonsGrid').classList.remove('has-flags');
   }
 
-  // warnings + bench note
+  // warnings + bench note(引擎 warnings 走 codes,bench note / parse note 本就 i18n)
   const warnBox = $('warningsBox');
-  const allWarn = [...(out.warnings || [])];
+  const allWarn = [...codedStrings(out.warnings_coded, out.warnings, 'rw_')];
   if (benchNote) allWarn.push(benchNote);
   if (parsed && parsed.noteKey) allWarn.push(t('parse_prefix') + t(parsed.noteKey, ...(parsed.noteArgs || [])));
   if (allWarn.length) {
@@ -1593,6 +1679,32 @@ function renderGates(out) {
 const SVGNS = 'http://www.w3.org/2000/svg';
 
 // 7a. 淨值曲線 vs 基準(對數視覺可選,這裡用線性但自動縮放)
+// 長序列(日內 1 分 K 等,>50k 期)抽稀:單條 SVG path 塞 50 萬點會拖垮瀏覽器。
+// 分桶保 min/max(桶內先出現者在前)→ 回撤尖點不會被抽稀抹掉;首末點原樣保留。
+// 只影響「畫」,統計全部在引擎端用完整序列算完才回來。
+function decimateSeries(arr, maxPts = 2400) {
+  const n = arr.length;
+  if (n <= maxPts) return arr;
+  const buckets = Math.floor(maxPts / 2) - 1;
+  const out = [arr[0]];
+  const step = (n - 2) / buckets;
+  for (let b = 0; b < buckets; b++) {
+    const s = 1 + Math.floor(b * step);
+    const e = Math.min(n - 1, 1 + Math.floor((b + 1) * step));
+    if (s >= e) continue;
+    let mi = s, ma = s;
+    for (let i = s + 1; i < e; i++) {
+      if (arr[i] < arr[mi]) mi = i;
+      if (arr[i] > arr[ma]) ma = i;
+    }
+    const first = Math.min(mi, ma), second = Math.max(mi, ma);
+    out.push(arr[first]);
+    if (second !== first) out.push(arr[second]);
+  }
+  out.push(arr[n - 1]);
+  return out;
+}
+
 function drawEquityChart(equity, bench, parsed) {
   const host = $('equityChart');
   host.innerHTML = '';
@@ -1601,6 +1713,10 @@ function drawEquityChart(equity, bench, parsed) {
     $('equityLegend').innerHTML = '';
     return;
   }
+  // 抽稀防呆(日內長序列);srcN 記原始期數,x 軸末標籤才對得上真正的最後一期。
+  const srcN = equity.length;
+  equity = decimateSeries(equity);
+  if (bench && bench.length >= 2) bench = decimateSeries(bench);
 
   const W = 640, H = 300, padL = 46, padR = 16, padT = 16, padB = 28;
   const iw = W - padL - padR, ih = H - padT - padB;
@@ -1669,7 +1785,7 @@ function drawEquityChart(equity, bench, parsed) {
 
   // x 軸端點標籤(首/末日期或期數)
   const lab0 = parsed && parsed.dates ? parsed.dates[0] : t('equity_period', 1);
-  const labN = parsed && parsed.dates ? parsed.dates[Math.min(parsed.dates.length - 1, n - 1)] : t('equity_period', n);
+  const labN = parsed && parsed.dates ? parsed.dates[Math.min(parsed.dates.length - 1, srcN - 1)] : t('equity_period', srcN);
   svg.appendChild(mkText(padL, H - 8, lab0, 'axis-text', 'start'));
   svg.appendChild(mkText(W - padR, H - 8, labN, 'axis-text', 'end'));
 
@@ -1894,6 +2010,8 @@ function setParsed(parsed) {
   refreshFilePill();
   $('runBtn').disabled = false;
   hideError();
+  // demo 動線:資料就緒 → 自動帶到「校準參數」區,下一步一目瞭然(尊重 reduced-motion)
+  smoothScrollTo($('calibrate'));
   log('已解析:', { mode: parsed.mode, nRows: parsed.nRows, noteKey: parsed.noteKey });
 }
 
@@ -1937,6 +2055,14 @@ function bindUI() {
   const drop = $('drop'), input = $('fileInput');
   input.addEventListener('change', (e) => { if (e.target.files[0]) handleFile(e.target.files[0]); });
 
+  // 鍵盤可達性:上傳區可 Tab 聚焦,Enter / Space 開啟檔案選擇(等同點擊)
+  drop.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      input.click();
+    }
+  });
+
   ['dragenter', 'dragover'].forEach(ev =>
     drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('dragover'); }));
   ['dragleave', 'drop'].forEach(ev =>
@@ -1970,10 +2096,30 @@ function bindUI() {
     b.addEventListener('click', () => setLang(b.getAttribute('data-lang')));
   });
 
-  // 讓引擎在使用者上傳/互動時先預熱(不阻塞 UI),縮短點「照妖」後的等待
-  const warmOnce = () => { document.removeEventListener('pointerdown', warmOnce);
-    if (!State.engineReady && !State.loading) ensureEngine().catch(() => {}); };
+  // 引擎預熱:縮短點「照妖」後的等待。
+  // ① 首次互動(pointerdown)立即預熱——使用者一動手,十之八九會走到照妖。
+  // ② 就算不動手:load 完 3 秒後趁瀏覽器 idle 自動預熱(requestIdleCallback,無則直接跑),
+  //    首載 ~15s 的 Pyodide 下載在使用者讀文案時就完成。
+  const warm = () => { if (!State.engineReady && !State.loading) ensureEngine().catch(() => {}); };
+  const warmOnce = () => { document.removeEventListener('pointerdown', warmOnce); warm(); };
   document.addEventListener('pointerdown', warmOnce, { once: true });
+  const idleWarm = () => {
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(warm, { timeout: 4000 });
+    } else {
+      warm();
+    }
+  };
+  if (document.readyState === 'complete') setTimeout(idleWarm, 3000);
+  else window.addEventListener('load', () => setTimeout(idleWarm, 3000), { once: true });
+}
+
+// 尊重 prefers-reduced-motion 的捲動:偏好減少動態時用瞬跳,否則平滑。
+function smoothScrollTo(node) {
+  if (!node) return;
+  let reduce = false;
+  try { reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) {}
+  node.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
 }
 
 // ============================================================================

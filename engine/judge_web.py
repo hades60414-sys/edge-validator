@@ -410,8 +410,23 @@ def cost_stress(returns: np.ndarray, turnover: np.ndarray, cost_bps: float,
 # 6. 綜合裁決(誠實、保守)
 # ===========================================================================
 def _verdict(signals: dict) -> dict:
-    """收集所有訊號 → overall / score_0to100 / reasons(人話)/ red_flags。"""
+    """收集所有訊號 → overall / score_0to100 / reasons(人話)/ red_flags。
+
+    回傳同時帶【結構化 reason codes】(reasons_coded / red_flags_coded):
+    每項 {"code": str, "params": dict},與 reasons / red_flags 逐位 1:1 對應。
+    zh 字串維持不變(向後相容);前端 EN 模式用 code+params 渲染英文模板。
+    純加欄,不改任何既有值。"""
     reasons, red_flags = [], []
+    reasons_coded, red_flags_coded = [], []
+
+    def _reason(zh: str, code: str, **params):
+        reasons.append(zh)
+        reasons_coded.append({"code": code, "params": params})
+
+    def _flag(zh: str, code: str, **params):
+        red_flags.append(zh)
+        red_flags_coded.append({"code": code, "params": params})
+
     score = 50.0
 
     dsr = signals.get("dsr_prob")
@@ -433,107 +448,127 @@ def _verdict(signals: dict) -> dict:
     # --- DSR ---
     if dsr is not None and np.isfinite(dsr):
         if dsr >= 0.95:
-            reasons.append(f"通縮夏普(DSR)={dsr:.2f}:扣掉試了 {n_trials} 種參數的多重檢定後,真實有 edge 的機率仍高。")
+            _reason(f"通縮夏普(DSR)={dsr:.2f}:扣掉試了 {n_trials} 種參數的多重檢定後,真實有 edge 的機率仍高。",
+                    "dsr_high_confidence", dsr=float(dsr), n_trials=int(n_trials))
             score += 18
         elif dsr >= 0.60:
-            reasons.append(f"通縮夏普(DSR)={dsr:.2f}:過了雜訊地板(0.60),但信心非頂級——別當鐵板。")
+            _reason(f"通縮夏普(DSR)={dsr:.2f}:過了雜訊地板(0.60),但信心非頂級——別當鐵板。",
+                    "dsr_above_noise_floor", dsr=float(dsr))
             score += 6
         else:
-            reasons.append(f"通縮夏普(DSR)={dsr:.2f} < 0.60:扣掉多重檢定後,真有 edge 的機率不到一半,高度疑似雜訊。")
-            red_flags.append(f"DSR={dsr:.2f} 低於雜訊地板 0.60。")
+            _reason(f"通縮夏普(DSR)={dsr:.2f} < 0.60:扣掉多重檢定後,真有 edge 的機率不到一半,高度疑似雜訊。",
+                    "dsr_below_noise_floor", dsr=float(dsr))
+            _flag(f"DSR={dsr:.2f} 低於雜訊地板 0.60。", "dsr_below_noise_floor", dsr=float(dsr))
             score -= 22
             overfit = True
             real = False
     else:
-        reasons.append("DSR 無法計算(樣本或變異不足),不納入判斷。")
+        _reason("DSR 無法計算(樣本或變異不足),不納入判斷。", "dsr_not_computable")
 
     # --- 封頂逃逸 fail-closed(★R5:雜訊硬化封頂缺口的收口★)---
     #   matrix 硬化已把 n_trials 放大到封頂上限(32×欄數),DSR 仍撐在雜訊地板(0.60)之上。
     #   這【不是】edge 的證據,而是「欄數過多/樣本過短,通縮上限吃不掉這個贏家」的病態——
     #   高欄數×極短樣本下,一次幸運雜訊抽樣也能撐住 DSR。誠實 fail-closed:不判 likely-real。
     if capped_escape:
-        reasons.append(
+        _reason(
             f"雜訊硬化已把試驗數放大到封頂({n_trials}),通縮夏普仍未跌破雜訊地板(0.60)——"
             "這通常代表【欄數過多/樣本過短】,統計上無法把這個樣本內贏家與一次幸運的雜訊抽樣區分開。"
-            "本引擎採保守 fail-closed:無法排除過擬合,不判定為真。")
-        red_flags.append("封頂逃逸:試驗數放大到上限後 DSR 仍站在雜訊地板上,欄數過多/樣本過短無法排除過擬合。")
+            "本引擎採保守 fail-closed:無法排除過擬合,不判定為真。",
+            "capped_escape_fail_closed", n_trials=int(n_trials))
+        _flag("封頂逃逸:試驗數放大到上限後 DSR 仍站在雜訊地板上,欄數過多/樣本過短無法排除過擬合。",
+              "capped_escape")
         score -= 14
         real = False  # 誠實降級:至少不 likely-real(視其他訊號落在 inconclusive/overfit)
 
     # --- PBO ---
     if pbo is not None and np.isfinite(pbo):
         if pbo > 0.5:
-            reasons.append(f"回測過配機率(PBO)={pbo:.2f} > 0.50:樣本內選到的最佳者,樣本外多半墊底——典型過擬合特徵。")
-            red_flags.append(f"PBO={pbo:.2f} > 0.50。")
+            _reason(f"回測過配機率(PBO)={pbo:.2f} > 0.50:樣本內選到的最佳者,樣本外多半墊底——典型過擬合特徵。",
+                    "pbo_high", pbo=float(pbo))
+            _flag(f"PBO={pbo:.2f} > 0.50。", "pbo_high", pbo=float(pbo))
             score -= 20
             overfit = True
             real = False
         else:
-            reasons.append(f"回測過配機率(PBO)={pbo:.2f} ≤ 0.50:樣本內贏家在樣本外沒有系統性崩盤。")
+            _reason(f"回測過配機率(PBO)={pbo:.2f} ≤ 0.50:樣本內贏家在樣本外沒有系統性崩盤。",
+                    "pbo_ok", pbo=float(pbo))
             score += 10
     # returns 模式無 PBO,不扣分
 
     # --- permutation null ---
     if perm_p is not None and np.isfinite(perm_p):
         if perm_p > 0.5:
-            reasons.append(f"隨機重排檢定 p={perm_p:.2f} > 0.50:把報酬時序打亂後,一半以上的隨機版本夏普不輸真實——沒看到真訊號。")
-            red_flags.append(f"permutation p={perm_p:.2f} > 0.50。")
+            _reason(f"隨機重排檢定 p={perm_p:.2f} > 0.50:把報酬時序打亂後,一半以上的隨機版本夏普不輸真實——沒看到真訊號。",
+                    "perm_noise", p=float(perm_p))
+            _flag(f"permutation p={perm_p:.2f} > 0.50。", "perm_noise", p=float(perm_p))
             score -= 18
             overfit = True
             real = False
         elif perm_pass:
-            reasons.append(f"隨機重排檢定 p={perm_p:.2f}:真實夏普勝過 95% 的隨機打亂版本,時序結構帶了資訊。")
+            _reason(f"隨機重排檢定 p={perm_p:.2f}:真實夏普勝過 95% 的隨機打亂版本,時序結構帶了資訊。",
+                    "perm_pass", p=float(perm_p))
             score += 14
         else:
-            reasons.append(f"隨機重排檢定 p={perm_p:.2f}:未勝過隨機 p95 門檻,訊號不夠乾淨。")
+            _reason(f"隨機重排檢定 p={perm_p:.2f}:未勝過隨機 p95 門檻,訊號不夠乾淨。",
+                    "perm_below_threshold", p=float(perm_p))
             score -= 4
             real = False
 
     # --- 成本 ×3 ---
     if cost3 is not None and np.isfinite(cost3):
         if cost3 > 0:
-            reasons.append(f"成本壓力 ×3 後夏普={cost3:.2f} 仍為正:對交易成本有一定緩衝。")
+            _reason(f"成本壓力 ×3 後夏普={cost3:.2f} 仍為正:對交易成本有一定緩衝。",
+                    "cost_x3_positive", sharpe=float(cost3))
             score += 8
         else:
-            reasons.append(f"成本壓力 ×3 後夏普={cost3:.2f} ≤ 0:成本稍微保守就翻負,edge 恐被摩擦吃光。")
-            red_flags.append("成本 ×3 後夏普轉負。")
+            _reason(f"成本壓力 ×3 後夏普={cost3:.2f} ≤ 0:成本稍微保守就翻負,edge 恐被摩擦吃光。",
+                    "cost_x3_negative", sharpe=float(cost3))
+            _flag("成本 ×3 後夏普轉負。", "cost_x3_negative")
             score -= 12
             real = False
 
     # --- 贏基準 ---
     if beats_bench is not None:
+        has_xc = excess_cagr is not None and np.isfinite(excess_cagr)
         if beats_bench:
-            xc = f"(超額 CAGR {excess_cagr*100:+.1f}%)" if excess_cagr is not None and np.isfinite(excess_cagr) else ""
-            reasons.append(f"夏普勝過基準{xc}:相對買進持有有加值。")
+            xc = f"(超額 CAGR {excess_cagr*100:+.1f}%)" if has_xc else ""
+            _reason(f"夏普勝過基準{xc}:相對買進持有有加值。",
+                    "bench_beaten", excess_cagr=(float(excess_cagr) if has_xc else None))
             score += 8
         else:
-            reasons.append("夏普未勝過基準:相對買進持有沒有明顯優勢,先確認是否值得多做這些交易。")
+            _reason("夏普未勝過基準:相對買進持有沒有明顯優勢,先確認是否值得多做這些交易。",
+                    "bench_not_beaten")
             score -= 8
             real = False
 
     # --- 集中度 ---
     if conc is not None and np.isfinite(conc):
         if conc >= 0.40:
-            reasons.append(f"報酬集中度={conc*100:.0f}%:最好那一期就貢獻近半以上報酬,績效靠少數暴衝,脆弱。")
-            red_flags.append(f"單期集中度 {conc*100:.0f}% ≥ 40%。")
+            _reason(f"報酬集中度={conc*100:.0f}%:最好那一期就貢獻近半以上報酬,績效靠少數暴衝,脆弱。",
+                    "concentration_high", concentration=float(conc))
+            _flag(f"單期集中度 {conc*100:.0f}% ≥ 40%。", "concentration_high", concentration=float(conc))
             score -= 12
             real = False
         else:
-            reasons.append(f"報酬集中度={conc*100:.0f}%:報酬分布相對均勻,不靠少數幾根。")
+            _reason(f"報酬集中度={conc*100:.0f}%:報酬分布相對均勻,不靠少數幾根。",
+                    "concentration_ok", concentration=float(conc))
             score += 4
 
     # --- n_trials 懲罰 ---
     if n_trials and n_trials > 20:
         pen = min(15.0, 3.0 * np.log10(n_trials))
-        reasons.append(f"你試了 {n_trials} 種參數:試越多,靠運氣撞到漂亮結果的機率越高,已按此扣分。")
+        _reason(f"你試了 {n_trials} 種參數:試越多,靠運氣撞到漂亮結果的機率越高,已按此扣分。",
+                "many_trials_penalty", n_trials=int(n_trials))
         score -= pen
     elif n_trials and n_trials > 1:
-        reasons.append(f"你試了 {n_trials} 種參數:已納入多重檢定校正(DSR)。")
+        _reason(f"你試了 {n_trials} 種參數:已納入多重檢定校正(DSR)。",
+                "trials_corrected", n_trials=int(n_trials))
 
     # --- 樣本量提醒 ---
     if n_periods and n_periods < 60:
-        reasons.append(f"樣本只有 {n_periods} 期:統計檢定力弱,任何結論都要打折看待。")
-        red_flags.append(f"樣本過短(僅 {n_periods} 期)。")
+        _reason(f"樣本只有 {n_periods} 期:統計檢定力弱,任何結論都要打折看待。",
+                "sample_short", n_periods=int(n_periods))
+        _flag(f"樣本過短(僅 {n_periods} 期)。", "sample_short", n_periods=int(n_periods))
         score -= 8
 
     # --- 綜合判定 ---
@@ -547,14 +582,18 @@ def _verdict(signals: dict) -> dict:
 
     # 誠實收尾:過關不等於會賺
     if overall == "likely-real":
-        reasons.append("重要:通過這些檢定只代表『沒發現明顯的過度擬合』,不保證未來會賺——真金白銀前請務必前向(walk-forward)驗證與小額實測。")
+        _reason("重要:通過這些檢定只代表『沒發現明顯的過度擬合』,不保證未來會賺——真金白銀前請務必前向(walk-forward)驗證與小額實測。",
+                "closing_likely_real")
     elif overall == "inconclusive":
-        reasons.append("結論不明:證據不足以判定真偽,建議補更多樣本或做前向測試再定奪。")
+        _reason("結論不明:證據不足以判定真偽,建議補更多樣本或做前向測試再定奪。",
+                "closing_inconclusive")
     else:
-        reasons.append("提醒:即使某些指標好看,上述紅旗顯示這條策略八成是過擬合的產物,別下真錢。")
+        _reason("提醒:即使某些指標好看,上述紅旗顯示這條策略八成是過擬合的產物,別下真錢。",
+                "closing_likely_overfit")
 
     return {"overall": overall, "score_0to100": round(score, 1),
-            "reasons": reasons, "red_flags": red_flags}
+            "reasons": reasons, "red_flags": red_flags,
+            "reasons_coded": reasons_coded, "red_flags_coded": red_flags_coded}
 
 
 # ===========================================================================
@@ -572,6 +611,17 @@ def _infer_ppy(dates, fallback):
                 # 用「總span/步數」= 平均每步天數(含週末缺口),日資料 → ~1.4 天/步 → ~260/年,
                 # 週資料 → 7 → ~52,月 → ~30 → ~12。比 median 誠實(median 會把週末缺口洗掉)。
                 avg_days = total_days / steps
+                if avg_days < 0.5:
+                    # 日內資料(平均步距 < 半天):ppy = 每日 bar 數 × 每年交易日數,兩者皆由
+                    # 資料自己誠實推——bar/日 = 總 bar 數 / 有 bar 的日曆日數;交易日/年 =
+                    # 365 × 有 bar 日數 / 日曆 span(台股週一~五 → ~250-260;加密 24/7 → 365)。
+                    # 台股 1 分 ≈ 266 bar × ~250 日 ≈ 66k;加密 1m = 1440 × 365 = 525,600。
+                    days = idx.dt.normalize()
+                    n_days = int(days.nunique())
+                    span_days = float((days.iloc[-1] - days.iloc[0]).days) + 1.0
+                    bars_per_day = len(idx) / max(n_days, 1)
+                    tdays_per_year = 365.0 * n_days / span_days if span_days > 0 else 252.0
+                    return float(np.clip(round(bars_per_day * tdays_per_year), 1, 600000))
                 return float(np.clip(round(365.0 / avg_days), 1, 35040))
         except Exception:
             pass
@@ -579,8 +629,17 @@ def _infer_ppy(dates, fallback):
 
 
 def analyze(payload: dict) -> dict:
-    """統一裁判入口。契約見模組 docstring / README。純函數。"""
+    """統一裁判入口。契約見模組 docstring / README。純函數。
+
+    warnings_coded:與 warnings 逐位 1:1 對應的結構化 code(加欄向後相容,
+    每項 {"code": str, "params": dict});前端 EN 模式用它渲染英文。"""
     warnings = []
+    warnings_coded = []
+
+    def _warn(zh: str, code: str, **params):
+        warnings.append(zh)
+        warnings_coded.append({"code": code, "params": params})
+
     mode = payload.get("mode", "returns")
     dates = payload.get("dates")
     n_trials = int(payload.get("n_trials") or 1)
@@ -594,8 +653,11 @@ def analyze(payload: dict) -> dict:
         matrix = payload.get("matrix") or {}
         if not matrix:
             return {"ok": False, "warnings": ["matrix 模式但 matrix 為空"],
+                    "warnings_coded": [{"code": "matrix_empty", "params": {}}],
                     "metrics": {}, "verdict": {"overall": "inconclusive",
-                    "score_0to100": 0, "reasons": ["無資料"], "red_flags": []}}
+                    "score_0to100": 0, "reasons": ["無資料"], "red_flags": [],
+                    "reasons_coded": [{"code": "no_data", "params": {}}],
+                    "red_flags_coded": []}}
         names = list(matrix.keys())
         cols = [np.asarray(matrix[k], dtype=float) for k in names]
         T = min(len(c) for c in cols)
@@ -619,23 +681,37 @@ def analyze(payload: dict) -> dict:
         #   的結論其實踩在檢定力懸崖上。不動 verdict(避免誤殺真 edge),只加警語照實告知。
         if (harden_diag and not harden_diag["hardened"] and harden_diag["dsr_at_base"] is not None
                 and harden_diag["dsr_at_base"] >= REAL_CONF_BAR and len(names) >= T):
-            warnings.append(
+            _warn(
                 f"注意:你在 {T} 期樣本上搜尋了 {len(names)} 欄(欄數 ≥ 樣本期數)。此時即使通縮夏普"
                 "(DSR)看似達標,一次幸運的雜訊贏家與真 edge 在統計上難以區分——DSR「達標」的結論"
-                "檢定力薄弱,務必以更長樣本或前向(walk-forward)測試複核,別直接當真。")
+                "檢定力薄弱,務必以更長樣本或前向(walk-forward)測試複核,別直接當真。",
+                "high_dim_low_power", n_cols=int(len(names)), n_periods=int(T))
     else:
         returns = np.nan_to_num(np.asarray(payload.get("returns") or [], dtype=float), nan=0.0)
         if returns.size == 0:
             return {"ok": False, "warnings": ["returns 模式但 returns 為空"],
+                    "warnings_coded": [{"code": "returns_empty", "params": {}}],
                     "metrics": {}, "verdict": {"overall": "inconclusive",
-                    "score_0to100": 0, "reasons": ["無資料"], "red_flags": []}}
+                    "score_0to100": 0, "reasons": ["無資料"], "red_flags": [],
+                    "reasons_coded": [{"code": "no_data", "params": {}}],
+                    "red_flags_coded": []}}
         names, mat = None, None
         trial_sharpes = np.array([_sharpe_periodic(returns)])
         harden_diag = None  # returns 模式不硬化(硬化只在 matrix)
 
     n = returns.size
     if n < 30:
-        warnings.append(f"樣本僅 {n} 期,統計檢定力弱,結論僅供參考。")
+        _warn(f"樣本僅 {n} 期,統計檢定力弱,結論僅供參考。", "short_sample", n=int(n))
+
+    # ---- 長序列效能守衛(日內資料 >50k 期:permutation/bootstrap 在瀏覽器會拖垮)----
+    #   誠實揭露:重抽次數降低只讓 p 值解析度變粗(p 的最小刻度 = 1/(n_perm+1)),
+    #   不改變檢定本身的語意;有 dates 的日內序列 ppy 已由 _infer_ppy 正確年化。
+    n_perm_eff, n_boot_eff = 2000, 1000
+    if n > 50000:
+        n_perm_eff, n_boot_eff = 500, 200
+        _warn(f"長序列({n} 期):permutation 重抽已降至 {n_perm_eff} 次、"
+              f"bootstrap 已降至 {n_boot_eff} 次(瀏覽器效能守衛;p 值解析度變粗,檢定語意不變)。",
+              "long_series_guard", n=int(n), n_perm=n_perm_eff, n_boot=n_boot_eff)
 
     # ---- 指標 ----
     metrics = compute_metrics(returns, ppy)
@@ -648,7 +724,7 @@ def analyze(payload: dict) -> dict:
            "harden": harden_diag}  # matrix 硬化診斷(returns 模式為 None)
 
     # ---- permutation null ----
-    perm = permutation_null(returns, ppy)
+    perm = permutation_null(returns, ppy, n_perm=n_perm_eff)
 
     # ---- PBO / FWER(僅 matrix)----
     pbo_out = None
@@ -659,11 +735,12 @@ def analyze(payload: dict) -> dict:
                      if bench_ret is not None else np.zeros(mat.shape[0]))
         if bench_arr.size < mat.shape[0]:
             bench_arr = np.zeros(mat.shape[0])
-        fw = run_fwer_gates(mat, names, bench_arr, n_blocks_pbo=12)
+        fw = run_fwer_gates(mat, names, bench_arr, n_bootstrap=n_boot_eff, n_blocks_pbo=12)
         fwer_out = {"spa": fw["spa"], "per_candidate": fw["per_candidate"],
                     "n_rejected": fw["n_rejected"]}
         if not fw["computed"]:
-            warnings.append(f"FWER 未計算:{fw.get('reason', '樣本不足')}(需 ≥100 期)。")
+            _warn(f"FWER 未計算:{fw.get('reason', '樣本不足')}(需 ≥100 期)。",
+                  "fwer_not_computed", n_obs=int(fw.get("n_obs", 0)), min_obs=100)
 
     # ---- 成本壓力(僅有 turnover)----
     cost_out = None
@@ -703,7 +780,7 @@ def analyze(payload: dict) -> dict:
         bench_curve = _equity_from_returns(b).tolist()
 
     return {
-        "ok": True, "warnings": warnings,
+        "ok": True, "warnings": warnings, "warnings_coded": warnings_coded,
         "metrics": metrics, "dsr": dsr, "permutation_null": perm,
         "pbo": pbo_out, "fwer": fwer_out, "cost_stress": cost_out,
         "benchmark_compare": bench_cmp, "verdict": verdict,
