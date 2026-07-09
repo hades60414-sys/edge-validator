@@ -147,6 +147,18 @@
 
       <!-- 主判決卡 -->
       <div class="verdict-card" id="verdictCard" data-verdict="inconclusive">
+
+        <!-- 白話首屏:給不懂統計的朋友,秒懂這條曲線信不信得過 -->
+        <div class="plain-verdict">
+          <div class="plain-tag"><span class="pdot"></span><span id="plainTag">—</span></div>
+          <p class="plain-headline" id="plainHeadline">—</p>
+          <ul class="plain-points" id="plainPoints"></ul>
+          <p class="plain-frame">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg>
+            <span><b>統計過關 ≠ 會賺。</b>這只是照妖鏡,不是水晶球——它只回答「這條曲線像不像雜訊/過度最佳化」,不預測未來、不給買賣建議。你的資料全程留在瀏覽器、不上傳。往下捲有給懂統計的人看的完整檢定細節。</span>
+          </p>
+        </div>
+
         <div class="verdict-top">
           <div class="verdict-main">
             <div class="verdict-label">綜合判定</div>
@@ -179,10 +191,18 @@
         </div>
       </div>
 
+      <!-- ↓↓↓ 以下是給懂統計的人看的細節。看不懂沒關係,上面那句話就是結論。 ↓↓↓ -->
+      <div class="tech-divider">
+        <span class="tech-divider-line"></span>
+        <span class="tech-divider-txt">以下給想深究的人:完整統計證據</span>
+        <span class="tech-divider-line"></span>
+      </div>
+
       <!-- 指標網格 -->
       <div class="section-head" style="margin-top:40px">
         <span class="step-no">METRICS / 績效指標</span>
         <h2>風險調整後績效</h2>
+        <p>這些是原始績效數字(不含誠實性校正)——好看的數字容易騙人,所以上面那句白話結論才是重點。</p>
       </div>
       <div class="metrics-grid" id="metricsGrid"></div>
 
@@ -190,6 +210,7 @@
       <div class="section-head" style="margin-top:40px">
         <span class="step-no">GATES / 統計檢定</span>
         <h2>七道誠實閘的細節</h2>
+        <p>DSR(通縮夏普)、隨機重排、PBO、SPA/Romano–Wolf、成本壓力、對照基準——上方三個白話重點就是從這幾道閘翻譯來的。</p>
       </div>
       <div class="gates" id="gatesGrid"></div>
 

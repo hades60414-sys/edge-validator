@@ -484,6 +484,168 @@ _out  # 回傳 dict,交給 JS 用 toJs 轉
 // ============================================================================
 // 6. 渲染結果
 // ============================================================================
+
+// ---- 白話結論生成(給不懂統計的朋友:一句話 + 三重點)----
+// 移植自本地 app_local.py 的 _plain_headline_sentence / _plain_three_points 精神,
+// 但公開站是 BYO-CSV:沒有持倉歸因、沒有時間對半切 holdout,改用引擎實際回的
+// permutation(贏過隨機打亂)/ DSR(扣掉試 N 次運氣)/ benchmark(贏過基準)三根柱。
+
+// 首屏白話定調(最大字之上的小標)。
+const PLAIN_HEADLINE_TAG = {
+  'likely-real':    '看起來像真本事',
+  'likely-overfit': '八成是雜訊擬合出來的',
+  'inconclusive':   '還不能下定論',
+};
+
+// 把判決濃縮成一句人話(最大字)。動態依 verdict / CAGR / 贏不贏基準 / n_trials 生成。
+// 一個不懂統計的朋友只讀這一句,就該抓到「賺不賺 + 這數字信不信得過」。
+function plainHeadlineSentence(overall, metrics, benchCmp, nTrials) {
+  const cagr = metrics ? metrics.cagr : null;
+  const looksProfitable = isNum(cagr) && cagr > 0;
+
+  // 賺賠開場
+  let money;
+  if (looksProfitable) money = `這條曲線看起來很賺(年化約 ${fmtPct(cagr, 1)})`;
+  else if (isNum(cagr) && cagr <= 0) money = `這條曲線其實在虧(年化約 ${fmtPct(cagr, 1)})`;
+  else money = '先看這條曲線的體質';
+
+  // 贏不贏基準(誠實處理四情境,避免「贏過…多賺 -6.9%」這種自相矛盾)
+  // strategy_beats 是【風險調整後(夏普)】的勝負;excess_cagr 是【年化報酬】差,兩者可能不同號。
+  let beat = '';
+  if (benchCmp) {
+    const xc = benchCmp.excess_cagr;
+    const hasXc = isNum(xc);
+    if (benchCmp.strategy_beats) {
+      if (hasXc && xc < 0) {
+        // 夏普贏、但年化其實少賺 → 用更低波動換的,不是矛盾
+        beat = `、風險調整後(夏普)贏過無腦買進持有,但年化其實少賺約 ${fmtPct(-xc, 1)}——你是用更低的波動換到的`;
+      } else {
+        const xcTxt = hasXc ? `,多賺約 ${fmtPct(xc, 1)}` : '';
+        beat = `、而且贏過無腦買進持有基準${xcTxt}`;
+      }
+    } else {
+      if (hasXc && xc > 0) {
+        // 年化多賺、但夏普沒贏 → 靠多冒險換的
+        beat = `、年化雖多賺約 ${fmtPct(xc, 1)},但風險調整後(夏普)沒贏過無腦買進持有(多賺是靠多冒險換的)`;
+      } else {
+        beat = '、但沒贏過無腦買進持有基準';
+      }
+    }
+  }
+
+  // 單一序列(n_trials<=1)的誠實警語:純雜訊單一序列實測約一到兩成會被判 likely-real(隨波動浮動),
+  // 此時「像真本事」若不加註,信心會超過統計該有的謙遜。
+  const singleSeries = !isNum(nTrials) || nTrials <= 1;
+
+  if (overall === 'likely-real') {
+    if (singleSeries) {
+      return `${money}${beat}。扣掉運氣成分後統計上站得住——但你只丟了【一條】曲線(沒告訴我你試過幾種參數),` +
+        `對「剛好幸運抽中這一條」的分辨力有限,likely-real 也可能只是好運。真金白銀前,務必用你沒看過的新資料前向實測再定奪。`;
+    }
+    return `${money}${beat}。扣掉「試了 ${nTrials} 次剛好矇到」的運氣成分後,統計上還是站得住——` +
+      `像是真本事,不只是運氣好。(仍非保證會賺,真錢前請小額前向驗證。)`;
+  }
+  if (overall === 'likely-overfit') {
+    return `${money}${beat}。但統計上這漂亮數字八成是「試很多次剛好矇到」或承擔高風險換來的,` +
+      `不像可靠的真本事——別憑它下真錢。在你賠錢之前照出來,正是這台機器的用處。`;
+  }
+  // inconclusive
+  return `${money}${beat}。但統計上還不能確定這是真本事,還是剛好運氣好——證據不足以定論,` +
+    `建議再累積更多樣本,或做前向測試再定奪。`;
+}
+
+// 首屏三個一句話重點(icon + 一行)。公開站三根柱:
+//   ① 贏過隨機打亂嗎(permutation)② 扣掉試 N 次運氣後還站得住嗎(DSR)③ 贏過基準嗎(benchmark)
+// matrix 模式多一句「N 個策略裡幾個倖存(FWER)」。回 [{icon, text}]。
+function plainThreePoints(out, benchCmp) {
+  const points = [];
+  const perm = out.permutation_null;
+  const dsr = out.dsr;
+
+  // ① 贏過隨機打亂嗎(permutation null)
+  if (perm && isNum(perm.p_value)) {
+    if (perm.passes) {
+      points.push({ icon: '🎲', text:
+        `<b>贏得過隨機打亂嗎:贏了。</b>把你的報酬順序隨機洗牌上千次,你的真實成績仍站在 95% 的洗牌版本之上(p=${fmt(perm.p_value, 3)})——這條曲線不像純運氣拼出來的。` });
+    } else if (perm.p_value > 0.5) {
+      points.push({ icon: '🎲', text:
+        `<b>贏得過隨機打亂嗎:沒贏。</b>把報酬順序隨機洗牌後,超過一半的洗牌版本都能刷出跟你一樣好的成績(p=${fmt(perm.p_value, 3)})——這很像是雜訊。` });
+    } else {
+      points.push({ icon: '🎲', text:
+        `<b>贏得過隨機打亂嗎:沒到門檻。</b>你的成績比多數隨機洗牌版本好,但還沒好到能穩穩勝過 95%(p=${fmt(perm.p_value, 3)})。` });
+    }
+  } else {
+    points.push({ icon: '🎲', text: '<b>贏得過隨機打亂嗎:</b>樣本太短,沒能做隨機重排檢定。' });
+  }
+
+  // ② 扣掉試 N 次運氣後還站得住嗎(DSR)
+  if (dsr && isNum(dsr.dsr_prob)) {
+    const nt = isNum(dsr.n_trials) ? dsr.n_trials : 1;
+    const prob = dsr.dsr_prob;
+    const trialClause = nt > 1
+      ? `扣掉你試了 ${nt} 種參數的運氣後`
+      : `你只丟了一條曲線(當作沒調參)`;
+    if (prob >= 0.95) {
+      points.push({ icon: '🎯', text:
+        `<b>扣掉「試很多次」的運氣後還站得住嗎:站得住。</b>${trialClause},真有 edge 的機率約 ${fmtPct(prob, 0)}——高信心。` });
+    } else if (prob >= 0.60) {
+      points.push({ icon: '🎯', text:
+        `<b>扣掉「試很多次」的運氣後還站得住嗎:勉強站上雜訊地板。</b>${trialClause},真有 edge 的機率約 ${fmtPct(prob, 0)}(過了 60% 的雜訊地板,但沒到 95% 高信心)。` });
+    } else {
+      points.push({ icon: '🎯', text:
+        `<b>扣掉「試很多次」的運氣後還站得住嗎:站不住。</b>${trialClause},真有 edge 的機率只剩約 ${fmtPct(prob, 0)}——這漂亮數字多半是挑出來的運氣。` });
+    }
+  } else {
+    points.push({ icon: '🎯', text: '<b>扣掉「試很多次」的運氣後還站得住嗎:</b>資料不足以估算通縮夏普。' });
+  }
+
+  // ③ 贏過基準嗎(benchmark)
+  if (benchCmp) {
+    const xc = benchCmp.excess_cagr;
+    const hasXc = isNum(xc);
+    if (benchCmp.strategy_beats) {
+      const c = hasXc && xc > 0 ? `,年化多賺約 ${fmtPct(xc, 1)}` : '';
+      points.push({ icon: '🆚', text:
+        `<b>贏過無腦買進持有嗎:贏了。</b>風險調整後(夏普)勝過被動基準${c}——相對無腦持有有加值。` });
+    } else if (hasXc && xc > 0) {
+      points.push({ icon: '🆚', text:
+        `<b>贏過無腦買進持有嗎:半贏。</b>年化多賺約 ${fmtPct(xc, 1)},但風險調整後(夏普)沒贏——多出來的報酬是靠多冒險換的,不算真占便宜。` });
+    } else {
+      const c = hasXc ? `,年化少賺約 ${fmtPct(Math.abs(xc), 1)}` : '';
+      points.push({ icon: '🆚', text:
+        `<b>贏過無腦買進持有嗎:沒贏${c}。</b>先確認多做這些交易值不值得。` });
+    }
+  } else {
+    points.push({ icon: '🆚', text:
+      '<b>贏過無腦買進持有嗎:</b>你沒選對照基準(或資料無法對齊),這次略過比較。想比就在上方「對照基準」挑一條。' });
+  }
+
+  // matrix 模式:多一句「N 個策略裡幾個倖存(FWER)」
+  if (out.pbo || (out.fwer && out.fwer.spa)) {
+    const nStrat = out.pbo && isNum(out.pbo.n_strategies) ? out.pbo.n_strategies : null;
+    const nRej = out.fwer ? out.fwer.n_rejected : null;
+    const pbo = out.pbo ? out.pbo.pbo : null;
+    let txt;
+    if (isNum(nRej)) {
+      if (nRej > 0) {
+        txt = `<b>一次比 ${nStrat != null ? nStrat + ' ' : ''}條策略,幾條經得起考驗:${nRej} 條倖存。</b>` +
+          `多重比較修正(把「比越多越容易矇到一條」的運氣扣掉)後,還有 ${nRej} 條真的贏過基準。`;
+      } else {
+        txt = `<b>一次比 ${nStrat != null ? nStrat + ' ' : ''}條策略,幾條經得起考驗:全軍覆沒。</b>` +
+          `把「比越多越容易矇到」的運氣扣掉後,沒有任何一條穩穩贏過基準——這正是「一堆策略挑最好的一條」最典型的雜訊陷阱。`;
+      }
+    } else if (isNum(pbo)) {
+      txt = `<b>挑出來的最佳策略,樣本外會不會墊底:</b>過配機率 PBO = ${fmt(pbo, 2)}` +
+        (pbo > 0.5 ? '(>0.5,典型過擬合特徵——樣本內的冠軍到樣本外常墊底)。' : '(≤0.5,沒有系統性崩盤)。');
+    } else {
+      txt = '<b>多策略矩陣:</b>樣本期數不足(需 ≥100 期),PBO/SPA 全套閘未啟用。';
+    }
+    points.push({ icon: '🗂️', text: txt });
+  }
+
+  return points;
+}
+
 const VERDICT_META = {
   'likely-real':    { text: '可能是真的 edge', cls: 'likely-real',
     sub: '扣掉多重檢定與運氣成分後,證據仍支持這條策略帶了真訊號。但這只代表「沒發現明顯過擬合」,不保證會賺——真錢前務必前向驗證。',
@@ -506,6 +668,9 @@ function renderResults(out, parsed, benchNote) {
   $('verdictText').textContent = meta.text;
   $('verdictStamp').innerHTML = meta.stamp;
   $('verdictSub').textContent = meta.sub;
+
+  // ---- 白話首屏(給不懂統計的朋友:最大字一句話 + 三重點)----
+  renderPlain(out);
 
   // 分數 + 量表(動畫)
   const score = isNum(v.score_0to100) ? v.score_0to100 : 0;
@@ -553,6 +718,25 @@ function renderResults(out, parsed, benchNote) {
   // ---- 圖表 ----
   drawEquityChart(out.equity_curve, out.benchmark_curve, parsed);
   drawNullChart(out.permutation_null);
+}
+
+// 白話首屏:定調小標 + 一句話結論(最大字)+ 三個一句話重點。
+function renderPlain(out) {
+  const v = out.verdict;
+  const overall = v.overall;
+  const nTrials = out.dsr ? out.dsr.n_trials : 1;
+  const benchCmp = out.benchmark_compare || null;
+
+  $('plainTag').textContent = PLAIN_HEADLINE_TAG[overall] || '';
+  $('plainHeadline').textContent = plainHeadlineSentence(overall, out.metrics, benchCmp, nTrials);
+
+  const list = $('plainPoints');
+  list.innerHTML = '';
+  plainThreePoints(out, benchCmp).forEach(p => {
+    const li = el('li', null,
+      `<span class="pico" aria-hidden="true">${p.icon}</span><span class="ptxt">${p.text}</span>`);
+    list.appendChild(li);
+  });
 }
 
 function animateNumber(node, target, dur, decimals) {

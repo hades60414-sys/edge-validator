@@ -501,6 +501,97 @@ section { padding: 54px 0; }
 .verdict-card[data-verdict="likely-overfit"]{ --vc: var(--overfit); --vc-glow: var(--overfit-glow); --vc-dim: var(--overfit-dim); }
 .verdict-card[data-verdict="inconclusive"]  { --vc: var(--incon);   --vc-glow: var(--incon-glow);   --vc-dim: var(--incon-dim); }
 
+/* ---- 白話首屏:給不懂統計的朋友,秒懂結論(判決卡最上方,最大字)---- */
+.plain-verdict {
+  padding: 30px 34px 28px;
+  border-bottom: 1px solid var(--line);
+  background:
+    radial-gradient(130% 100% at 0% 0%, var(--vc-glow, transparent), transparent 55%),
+    var(--bg-1);
+}
+@media (max-width: 640px) { .plain-verdict { padding: 24px 22px 24px; } }
+
+.plain-tag {
+  display: inline-flex; align-items: center; gap: 9px;
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--vc, var(--ink-2));
+}
+.plain-tag .pdot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--vc, var(--ink-3));
+  box-shadow: 0 0 10px var(--vc-glow, transparent);
+}
+
+/* 一句話結論:最大字。用 display 字堆、行高鬆、顏色主文(不用判決色以免長句刺眼) */
+.plain-headline {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: clamp(20px, 2.9vw, 29px);
+  line-height: 1.42;
+  letter-spacing: -0.01em;
+  color: var(--ink-0);
+  margin: 14px 0 0;
+  max-width: 40ch;
+}
+
+/* 三個一句話重點 */
+.plain-points {
+  list-style: none;
+  margin: 22px 0 0;
+  padding: 0;
+  display: flex; flex-direction: column;
+  gap: 13px;
+}
+.plain-points li {
+  display: flex; gap: 13px;
+  align-items: flex-start;
+  font-size: 15px;
+  line-height: 1.58;
+  color: var(--ink-1);
+}
+.plain-points .pico {
+  flex: none;
+  font-size: 18px;
+  line-height: 1.4;
+  width: 24px;
+  text-align: center;
+  filter: saturate(1.1);
+}
+.plain-points .ptxt b { color: var(--ink-0); font-weight: 600; }
+
+/* 誠實框架一句(關鍵一句留首屏,長免責在頁尾) */
+.plain-frame {
+  display: flex; gap: 10px;
+  margin: 22px 0 0;
+  padding: 13px 16px;
+  border: 1px solid var(--incon-dim);
+  border-left: 2px solid var(--incon);
+  background: var(--incon-glow);
+  border-radius: var(--radius);
+  font-size: 13px;
+  line-height: 1.55;
+  color: #e6cf9a;
+}
+.plain-frame svg { flex: none; margin-top: 3px; color: var(--incon); }
+.plain-frame b { color: var(--incon); }
+
+/* 技術區分隔:告訴一般讀者「以下可略」 */
+.tech-divider {
+  display: flex; align-items: center; gap: 16px;
+  margin: 48px 0 0;
+}
+.tech-divider-line { flex: 1; height: 1px; background: var(--line); }
+.tech-divider-txt {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
 .verdict-top {
   display: grid;
   grid-template-columns: 1.3fr 1fr;
