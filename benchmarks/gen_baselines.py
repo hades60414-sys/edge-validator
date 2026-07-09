@@ -18,11 +18,15 @@
     皆為日頻 ISO 日期;前端要比較時以日期對齊即可。缺資料區間誠實截短。
 
 跑法(用 marketvault venv,有 marketvault access;farm 那條走 subprocess 用 farm venv):
-  C:/Users/user/Desktop/marketvault/.venv/Scripts/python.exe gen_baselines.py
+  <marketvault-venv>/python -m benchmarks.gen_baselines
+本機路徑不寫死在公開檔:用環境變數指到你自己的 repo(未設則相對推測,找不到就跳過該條):
+  EDGE_MARKETVAULT_DIR  → marketvault repo 根(有 `from marketvault import access`)
+  EDGE_FARM_DIR         → auto-quant-btc(農場)repo 根
 """
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -31,8 +35,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-MV = Path(r"C:/Users/user/Desktop/marketvault")
-FARM_REPO = Path(r"C:/Users/user/Desktop/auto-quant-btc")
+# 私有本機路徑改吃環境變數,不硬寫使用者名/資料夾到公開 repo(R5 稽核:避免路徑外洩)。
+# 未設時退回「相對本 repo 的姊妹資料夾」推測;仍找不到則對應基準會被跳過(誠實截短)。
+_SIBLINGS = Path(__file__).resolve().parents[2]
+MV = Path(os.environ.get("EDGE_MARKETVAULT_DIR", str(_SIBLINGS / "marketvault")))
+FARM_REPO = Path(os.environ.get("EDGE_FARM_DIR", str(_SIBLINGS / "auto-quant-btc")))
 FARM_VENV = FARM_REPO / ".venv" / "Scripts" / "python.exe"
 OUT = Path(__file__).resolve().parent / "baselines.json"
 
@@ -165,10 +172,12 @@ def build_factor_harvest() -> dict:
 # --------------------------------------------------------------------------
 # 3) highrisk_beta BTC(farm venv 需要 config/farm/backtest,走 subprocess)
 # --------------------------------------------------------------------------
+# farm repo 路徑由 FARM_REPO 注入(不硬寫使用者名到公開檔);__FARM_DIR__ 於呼叫前 replace 填入
+# (用 replace 而非 .format:下方 JSON 建構有字面 { } 會撞壞 .format)。
 _HIGHRISK_SUBPROC = r'''
 import os, sys, json
-os.chdir(r"C:/Users/user/Desktop/auto-quant-btc")
-sys.path.insert(0, r"C:/Users/user/Desktop/auto-quant-btc")
+os.chdir(r"__FARM_DIR__")
+sys.path.insert(0, r"__FARM_DIR__")
 from farm.highrisk_beta_mvp import backtest_single
 res, df, pos = backtest_single("BTC")   # BTC vol-target x 200MA(模組預設生產配置)
 eq = res["equity"].dropna()
@@ -185,7 +194,8 @@ sys.stdout.write("__JSON__" + json.dumps(out) + "__END__")
 
 def build_highrisk_beta() -> dict:
     proc = subprocess.run(
-        [str(FARM_VENV), "-c", _HIGHRISK_SUBPROC],
+        [str(FARM_VENV), "-c",
+         _HIGHRISK_SUBPROC.replace("__FARM_DIR__", str(FARM_REPO).replace("\\", "/"))],
         capture_output=True, text=True, timeout=600,
     )
     if proc.returncode != 0:

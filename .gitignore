@@ -3,6 +3,29 @@ __pycache__/
 .claude/
 .DS_Store
 
-# 本地版產物:不該進公開 repo(個人判決史 + 使用者投放的私有回測 CSV)
-local/snapshots.jsonl
+# ═══════════════════════════════════════════════════════════════════════════
+# 紅線:本地私有層絕不進公開 repo
+# ═══════════════════════════════════════════════════════════════════════════
+# 公開 repo = GitHub Pages 客戶端照妖鏡(index.html / app.js / style.css / engine/)。
+# 以下全是【本地版】私有資產:含個人真實持倉代號、個人絕對路徑(本機 portfolio.db /
+# marketvault venv 路徑)、判決史、投放的私有回測 CSV。
+# 曾發生 `git add -A` 會把整個 local/*.py 連同持倉代號+私有路徑 stage 到 public repo
+# 的缺口(R5 稽核 HIGH-2)。這裡採【整層封鎖】而非逐檔白名單,fail-closed:
+# 新增本地檔預設就不會外洩,除非明確 !例外放行。
+
+# 整個本地 Streamlit 工作台(程式碼含持倉代號/個人路徑)
+local/
+
+# 判決史 + 投放的私有回測 CSV
+snapshots.jsonl
 watch/*.csv
+
+# 描述本地架構/迴圈的個人文件(含持倉、個人路徑、私有敘事)
+LOCAL_ARCHITECTURE.md
+LOOP_STATE.md
+R0_BUILD_SPEC.md
+run_local.bat
+
+# watch/ 資料夾只保留說明,不收使用者投放物
+watch/*
+!watch/README.txt

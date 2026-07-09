@@ -152,11 +152,19 @@ def harden_matrix_n_trials(returns: np.ndarray, trial_sharpes: np.ndarray,
       DSR < 0.95 → 沿 HARDEN_MULTS 逐級放大 n_trials,回報「首次讓 DSR < 0.60」那級(或封頂級)。
                    高 n_trials 正是「這個贏家在如此廣的搜尋下毫不出奇」的誠實表述,非灌水。
 
-    回 (effective_n_trials, diag)。diag 帶 dsr_at_base / dsr_final / bar / hardened,供揭露。
+    ★封頂逃逸 fail-closed(R5)★:若沿 HARDEN_MULTS 放大到封頂上限(32×base),DSR【仍】
+      ≥ 雜訊地板(0.60),代表這個贏家在極廣搜尋下依舊未被通縮到雜訊——但這【不是】真達標
+      的證據,而是「欄數過多/樣本過短,通縮上限吃不掉它」的病態:高欄數×極短樣本組合下,一次
+      幸運的雜訊抽樣也能撐住 DSR。此時設 capped_escape=True,交給 _verdict 誠實 fail-closed
+      (不判 likely-real),而非讓它靠殘餘 DSR≥0.60 混過雜訊地板。
+
+    回 (effective_n_trials, diag)。diag 帶 dsr_at_base / dsr_final / bar / hardened /
+    capped_escape,供揭露。
     """
     base = max(int(base_n_trials), 2)
     diag = {"bar": REAL_CONF_BAR, "noise_floor": NOISE_FLOOR, "base_n_trials": base,
-            "dsr_at_base": None, "dsr_final": None, "hardened": False}
+            "dsr_at_base": None, "dsr_final": None, "hardened": False,
+            "capped_escape": False}
 
     def _dsr(nt: int) -> float:
         return float(deflated_sharpe(returns, nt, trial_sharpes)["dsr"])
@@ -178,7 +186,10 @@ def harden_matrix_n_trials(returns: np.ndarray, trial_sharpes: np.ndarray,
         diag["hardened"] = True
         if d == d and d < NOISE_FLOOR:
             return eff, diag
-    return eff, diag  # 封頂仍未跌破:回最大級(已盡量通縮)
+    # 封頂仍未跌破雜訊地板:fail-closed。已盡量通縮(回最大級),並標記封頂逃逸讓裁判擋下。
+    if diag["dsr_final"] == diag["dsr_final"] and diag["dsr_final"] >= NOISE_FLOOR:
+        diag["capped_escape"] = True
+    return eff, diag
 
 
 # ===========================================================================
@@ -414,6 +425,7 @@ def _verdict(signals: dict) -> dict:
     n_trials = signals.get("n_trials", 1)
     n_periods = signals.get("n_periods", 0)
     real_sharpe = signals.get("real_sharpe")
+    capped_escape = signals.get("capped_escape", False)
 
     overfit = False
     real = True  # 先假設 real,逐條扣
@@ -434,6 +446,19 @@ def _verdict(signals: dict) -> dict:
             real = False
     else:
         reasons.append("DSR 無法計算(樣本或變異不足),不納入判斷。")
+
+    # --- 封頂逃逸 fail-closed(★R5:雜訊硬化封頂缺口的收口★)---
+    #   matrix 硬化已把 n_trials 放大到封頂上限(32×欄數),DSR 仍撐在雜訊地板(0.60)之上。
+    #   這【不是】edge 的證據,而是「欄數過多/樣本過短,通縮上限吃不掉這個贏家」的病態——
+    #   高欄數×極短樣本下,一次幸運雜訊抽樣也能撐住 DSR。誠實 fail-closed:不判 likely-real。
+    if capped_escape:
+        reasons.append(
+            f"雜訊硬化已把試驗數放大到封頂({n_trials}),通縮夏普仍未跌破雜訊地板(0.60)——"
+            "這通常代表【欄數過多/樣本過短】,統計上無法把這個樣本內贏家與一次幸運的雜訊抽樣區分開。"
+            "本引擎採保守 fail-closed:無法排除過擬合,不判定為真。")
+        red_flags.append("封頂逃逸:試驗數放大到上限後 DSR 仍站在雜訊地板上,欄數過多/樣本過短無法排除過擬合。")
+        score -= 14
+        real = False  # 誠實降級:至少不 likely-real(視其他訊號落在 inconclusive/overfit)
 
     # --- PBO ---
     if pbo is not None and np.isfinite(pbo):
@@ -588,6 +613,16 @@ def analyze(payload: dict) -> dict:
         #   engine 內建此硬化 → 公開站(app.js 送 mode=matrix)與本地版共用同一判準,不分叉。
         honest_base = max(int(n_trials), len(names))
         n_trials, harden_diag = harden_matrix_n_trials(returns, trial_sharpes, honest_base)
+        # ★誠實揭露(R5):高欄數×極短樣本下,即便誠實基準的 DSR≥0.95 也不可信——
+        #   一次幸運的雜訊贏家與真 edge 在此樣本長度下【指紋一致】(DSR/permutation/PBO/集中度
+        #   全重疊),任何裁判都無法區分。此時 harden 不硬化(已達地板),但 DSR≥0.95 這個「真」
+        #   的結論其實踩在檢定力懸崖上。不動 verdict(避免誤殺真 edge),只加警語照實告知。
+        if (harden_diag and not harden_diag["hardened"] and harden_diag["dsr_at_base"] is not None
+                and harden_diag["dsr_at_base"] >= REAL_CONF_BAR and len(names) >= T):
+            warnings.append(
+                f"注意:你在 {T} 期樣本上搜尋了 {len(names)} 欄(欄數 ≥ 樣本期數)。此時即使通縮夏普"
+                "(DSR)看似達標,一次幸運的雜訊贏家與真 edge 在統計上難以區分——DSR「達標」的結論"
+                "檢定力薄弱,務必以更長樣本或前向(walk-forward)測試複核,別直接當真。")
     else:
         returns = np.nan_to_num(np.asarray(payload.get("returns") or [], dtype=float), nan=0.0)
         if returns.size == 0:
@@ -657,6 +692,7 @@ def analyze(payload: dict) -> dict:
         "excess_cagr": bench_cmp["excess_cagr"] if bench_cmp else None,
         "concentration": metrics["top_bar_concentration"],
         "n_trials": n_trials, "n_periods": n, "real_sharpe": perm["real_sharpe"],
+        "capped_escape": bool(harden_diag["capped_escape"]) if harden_diag else False,
     })
 
     # ---- equity curves ----

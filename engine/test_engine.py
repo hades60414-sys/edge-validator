@@ -1,7 +1,7 @@
 """Edge Validator engine 測試。
 
 用有 numpy/pandas(＋測試對照用 scipy)的 venv 跑:
-    C:/Users/user/Desktop/auto-quant-btc/.venv/Scripts/python.exe -m pytest engine/test_engine.py -v
+    <numpy-pandas-venv>/python -m pytest engine/test_engine.py -v
 
 涵蓋:
 1. statshim 對照 scipy 已知值(norm_cdf/norm_ppf/skew/kurtosis)。
@@ -244,6 +244,85 @@ def test_engine_returns_mode_unaffected_by_hardening():
                    "n_trials": 5, "periods_per_year": 252})
     assert out["dsr"]["harden"] is None            # returns 模式不硬化
     assert out["dsr"]["n_trials"] == 5             # n_trials 原樣不被上調
+
+
+# ===========================================================================
+# 4.6 封頂逃逸 fail-closed(★R5:雜訊硬化封頂缺口★)
+# ===========================================================================
+def test_capped_escape_specific_seed_fails_closed():
+    """R5 掃描找到的具體封頂逃逸點:K=50 欄 × N=120 期 純高斯雜訊,某 seed 下硬化放大到
+    封頂(32×=1600 試驗)DSR 仍 =0.634 ≥ 0.60 雜訊地板。修前判 likely-real(放水),
+    修後必須 fail-closed(不判 likely-real),且 harden 診斷帶 capped_escape=True 與殘餘 DSR。"""
+    K, N, s = 50, 120, 30
+    rng = np.random.default_rng(s * 100003 + K * 7 + N)
+    matrix = {f"c{i}": (0.012 * rng.standard_normal(N)).tolist() for i in range(K)}
+    out = analyze({"mode": "matrix", "matrix": matrix, "n_trials": 1, "periods_per_year": 252})
+    hd = out["dsr"]["harden"]
+    assert hd["capped_escape"] is True                       # 封頂逃逸被標記
+    assert hd["hardened"] is True
+    assert out["dsr"]["n_trials"] == K * 32                  # 已放大到封頂上限
+    assert hd["dsr_final"] >= jw.NOISE_FLOOR                 # 殘餘 DSR 仍站在雜訊地板上
+    assert out["verdict"]["overall"] != "likely-real"       # fail-closed:不判為真
+    assert any("封頂逃逸" in f for f in out["verdict"]["red_flags"])
+
+
+def test_capped_escape_never_leaks_across_extreme_grid():
+    """極端 K×短樣本全網格掃描:凡是硬化放大到封頂上限、殘餘 DSR 仍 ≥ 雜訊地板者
+    (capped_escape=True),【一律不得】被判 likely-real。附殘餘 DSR 供揭露。"""
+    Ks = [50, 100, 200, 500]
+    Ns = [60, 120, 260]
+    capped_seen = 0
+    capped_leaks = 0
+    max_residual_dsr = 0.0
+    for K in Ks:
+        for N in Ns:
+            for s in range(40):
+                rng = np.random.default_rng(s * 100003 + K * 7 + N)
+                matrix = {f"c{i}": (0.012 * rng.standard_normal(N)).tolist() for i in range(K)}
+                out = analyze({"mode": "matrix", "matrix": matrix, "n_trials": 1,
+                               "periods_per_year": 252})
+                hd = out["dsr"]["harden"]
+                if hd and hd["capped_escape"]:
+                    capped_seen += 1
+                    max_residual_dsr = max(max_residual_dsr, hd["dsr_final"])
+                    # fail-closed 核心保證:封頂逃逸者絕不 likely-real
+                    if out["verdict"]["overall"] == "likely-real":
+                        capped_leaks += 1
+    assert capped_seen > 0, "掃描網格未觸發任何封頂逃逸(測試無效,需含極端 K×短樣本)"
+    assert capped_leaks == 0, (
+        f"封頂逃逸放水 {capped_leaks}/{capped_seen} 判 likely-real"
+        f"(殘餘 DSR 最高 {max_residual_dsr:.3f})")
+
+
+def test_capped_escape_flag_off_for_normal_noise_and_true_edge():
+    """capped_escape 只在『放大到封頂仍 ≥ 地板』時觸發;一般雜訊(硬化即跌破地板)與
+    真 edge(DSR≥0.95 不硬化)都不得誤設此旗,以免濫殺。"""
+    # 一般雜訊:20 欄 × 260 期,硬化通常在中間級就跌破 0.60
+    rng = np.random.default_rng(11)
+    matrix = {f"p{i}": (0.012 * rng.standard_normal(260)).tolist() for i in range(20)}
+    out_noise = analyze({"mode": "matrix", "matrix": matrix, "n_trials": 20})
+    assert out_noise["dsr"]["harden"]["capped_escape"] is False
+    # 真 edge:DSR≥0.95 早退,未硬化,capped_escape 必為 False
+    rng = np.random.default_rng(1000)
+    matrix = {f"p{i}": (0.0012 + 0.008 * rng.standard_normal(500)).tolist() for i in range(20)}
+    bench = (0.0001 + 0.008 * rng.standard_normal(500)).tolist()
+    out_edge = analyze({"mode": "matrix", "matrix": matrix, "n_trials": 1,
+                        "benchmark_returns": bench, "periods_per_year": 252})
+    assert out_edge["dsr"]["harden"]["capped_escape"] is False
+    assert out_edge["verdict"]["overall"] == "likely-real"   # 真 edge 不被 fail-closed 誤殺
+
+
+def test_high_k_short_n_emits_sample_adequacy_warning():
+    """欄數 ≥ 樣本期數 且 DSR 在誠實基準即 ≥0.95(硬化不觸發)→ 檢定力懸崖,須加誠實警語
+    (不動 verdict,避免誤殺真 edge)。用 R5 掃描找到的 K=100×N=60 seed70 雜訊贏家。"""
+    K, N, s = 100, 60, 70
+    rng = np.random.default_rng(s * 100003 + K * 7 + N)
+    matrix = {f"c{i}": (0.012 * rng.standard_normal(N)).tolist() for i in range(K)}
+    out = analyze({"mode": "matrix", "matrix": matrix, "n_trials": 1, "periods_per_year": 252})
+    hd = out["dsr"]["harden"]
+    assert hd["hardened"] is False and hd["dsr_at_base"] >= 0.95   # 誠實基準即達標(病態)
+    assert any("欄數" in w and ("檢定力" in w or "前向" in w) for w in out["warnings"]), \
+        f"高欄數×短樣本未加檢定力警語:{out['warnings']}"
 
 
 # ===========================================================================
