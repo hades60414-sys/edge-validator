@@ -103,15 +103,32 @@ def probabilistic_sharpe(sr_hat: float, sr_benchmark: float, n_obs: int,
 
 def deflated_sharpe(returns: np.ndarray, n_trials: int,
                     trial_sharpes: np.ndarray) -> dict:
-    """單條策略每期報酬的 DSR。trial_sharpes=試過各參數的每期 Sharpe 池(matrix 模式才有真池;
-    returns 模式退化成 n_trials 驅動的通縮)。回傳每期尺度 sr / sr0 / dsr_prob / p_value。"""
+    """單條策略每期報酬的 DSR。trial_sharpes=試過各參數的每期 Sharpe 池(matrix 模式才有真池)。
+
+    試驗離散度(across-trial variance,Bailey & López de Prado 的 E[max SR] 需要它)取法:
+    - 池內 ≥2 條:用真試驗池的樣本變異(matrix 模式,原式)。
+    - 池內 <2 條且 n_trials>1(returns 模式:宣稱試過 N 組參數但只上傳最後一條,無真池):
+      用【SR 估計標準誤】SE(SR)=sqrt((1+SR²/2)/n) 的平方當試驗離散度的保守下限做真通縮,
+      並以 sr_variance_proxy=True 誠實揭露這是 proxy。真試驗池的離散度通常 ≥ 單條 SR 的
+      抽樣誤差,故此通縮是下限、偏溫和不偏嚴。修掉舊 bug:「單序列池 variance=0 →
+      E[max SR]≡0 → n_trials 完全無效」的假通縮(UI 卻宣稱已扣 N 次試驗的運氣)。
+    - n_trials=1:不通縮(sr0=0),行為與舊版逐位相同。
+    回傳每期尺度 sr / sr0 / dsr_prob / p_value / sr_variance_proxy。"""
     r = np.asarray(returns, dtype=float)
     r = r[np.isfinite(r)]
     std = r.std(ddof=1) if r.size > 1 else 0.0
     sr = float(r.mean() / std) if std > 0 else 0.0
     pool = np.asarray(trial_sharpes, dtype=float)
     pool = pool[np.isfinite(pool)]
-    sr_variance = float(np.var(pool, ddof=1)) if pool.size > 1 else 0.0
+    variance_proxy = False
+    if pool.size > 1:
+        sr_variance = float(np.var(pool, ddof=1))
+    elif int(n_trials) > 1:
+        n_eff = max(int(r.size), 2)
+        sr_variance = float((1.0 + 0.5 * sr * sr) / n_eff)  # SE(SR)² 保守下限 proxy
+        variance_proxy = True
+    else:
+        sr_variance = 0.0
     sr0 = expected_max_sharpe(sr_variance, n_trials)
     dsr = probabilistic_sharpe(
         sr_hat=sr, sr_benchmark=sr0, n_obs=r.size,
@@ -120,7 +137,7 @@ def deflated_sharpe(returns: np.ndarray, n_trials: int,
     )
     return {"sr_daily": sr, "sr0_daily": sr0, "dsr": dsr,
             "p_value": (1.0 - dsr) if np.isfinite(dsr) else float("nan"),
-            "n_trials": int(n_trials)}
+            "n_trials": int(n_trials), "sr_variance_proxy": variance_proxy}
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +445,15 @@ def _verdict(signals: dict) -> dict:
         red_flags_coded.append({"code": code, "params": params})
 
     score = 50.0
+    # score_breakdown:各閘加減分逐項揭露(R12 修:score 組成不再是黑箱)。
+    # 首項固定 base=50;之後每次加減分都記一筆 {code, delta},code 與 reasons_coded 對齊。
+    # 不變式:clip(Σdelta, 0, 100) == score_0to100(測試釘死)。純加欄,向後相容。
+    score_breakdown = [{"code": "base", "delta": 50.0}]
+
+    def _bump(code: str, delta: float):
+        nonlocal score
+        score += delta
+        score_breakdown.append({"code": code, "delta": float(delta)})
 
     dsr = signals.get("dsr_prob")
     pbo = signals.get("pbo")
@@ -441,25 +467,52 @@ def _verdict(signals: dict) -> dict:
     n_periods = signals.get("n_periods", 0)
     real_sharpe = signals.get("real_sharpe")
     capped_escape = signals.get("capped_escape", False)
+    dsr_var_proxy = bool(signals.get("dsr_var_proxy", False))
+    span_years = signals.get("calendar_span_years")
 
     overfit = False
     real = True  # 先假設 real,逐條扣
 
     # --- DSR ---
+    # dsr_var_proxy=True(returns 模式、n_trials>1、無真試驗池)時文案與數學一致:
+    # 通縮用的是「以 SR 估計標準誤為試驗離散度下限」的保守 proxy,照實講,不假稱有真試驗池。
+    # 非 proxy 路徑(n_trials=1 或 matrix 真池)的 zh 文案與 params 逐位維持舊版不變。
     if dsr is not None and np.isfinite(dsr):
         if dsr >= 0.95:
-            _reason(f"通縮夏普(DSR)={dsr:.2f}:扣掉試了 {n_trials} 種參數的多重檢定後,真實有 edge 的機率仍高。",
-                    "dsr_high_confidence", dsr=float(dsr), n_trials=int(n_trials))
-            score += 18
+            if dsr_var_proxy:
+                _reason(f"通縮夏普(DSR)={dsr:.2f}:單一序列沒有真試驗池,以 SR 估計標準誤作為"
+                        f"試驗離散度的保守下限、對「試了 {n_trials} 種參數」做真通縮後,真實有 edge "
+                        "的機率仍高(離散度為保守 proxy,非真試驗池)。",
+                        "dsr_high_confidence", dsr=float(dsr), n_trials=int(n_trials),
+                        var_proxy=True)
+            else:
+                _reason(f"通縮夏普(DSR)={dsr:.2f}:扣掉試了 {n_trials} 種參數的多重檢定後,真實有 edge 的機率仍高。",
+                        "dsr_high_confidence", dsr=float(dsr), n_trials=int(n_trials))
+            _bump("dsr_high_confidence", 18.0)
         elif dsr >= 0.60:
-            _reason(f"通縮夏普(DSR)={dsr:.2f}:過了雜訊地板(0.60),但信心非頂級——別當鐵板。",
-                    "dsr_above_noise_floor", dsr=float(dsr))
-            score += 6
+            if dsr_var_proxy:
+                _reason(f"通縮夏普(DSR)={dsr:.2f}:以 SR 標準誤為試驗離散度的保守通縮"
+                        f"(單序列無真試驗池,試驗數={n_trials})後過了雜訊地板(0.60),"
+                        "但信心非頂級——別當鐵板。",
+                        "dsr_above_noise_floor", dsr=float(dsr), n_trials=int(n_trials),
+                        var_proxy=True)
+            else:
+                _reason(f"通縮夏普(DSR)={dsr:.2f}:過了雜訊地板(0.60),但信心非頂級——別當鐵板。",
+                        "dsr_above_noise_floor", dsr=float(dsr))
+            _bump("dsr_above_noise_floor", 6.0)
         else:
-            _reason(f"通縮夏普(DSR)={dsr:.2f} < 0.60:扣掉多重檢定後,真有 edge 的機率不到一半,高度疑似雜訊。",
-                    "dsr_below_noise_floor", dsr=float(dsr))
-            _flag(f"DSR={dsr:.2f} 低於雜訊地板 0.60。", "dsr_below_noise_floor", dsr=float(dsr))
-            score -= 22
+            if dsr_var_proxy:
+                _reason(f"通縮夏普(DSR)={dsr:.2f} < 0.60:以 SR 標準誤為試驗離散度、通縮"
+                        f"「試了 {n_trials} 種參數」的運氣後,真有 edge 的機率不到一半,高度疑似雜訊。",
+                        "dsr_below_noise_floor", dsr=float(dsr), n_trials=int(n_trials),
+                        var_proxy=True)
+                _flag(f"DSR={dsr:.2f} 低於雜訊地板 0.60。", "dsr_below_noise_floor",
+                      dsr=float(dsr), var_proxy=True)
+            else:
+                _reason(f"通縮夏普(DSR)={dsr:.2f} < 0.60:扣掉多重檢定後,真有 edge 的機率不到一半,高度疑似雜訊。",
+                        "dsr_below_noise_floor", dsr=float(dsr))
+                _flag(f"DSR={dsr:.2f} 低於雜訊地板 0.60。", "dsr_below_noise_floor", dsr=float(dsr))
+            _bump("dsr_below_noise_floor", -22.0)
             overfit = True
             real = False
     else:
@@ -477,7 +530,7 @@ def _verdict(signals: dict) -> dict:
             "capped_escape_fail_closed", n_trials=int(n_trials))
         _flag("封頂逃逸:試驗數放大到上限後 DSR 仍站在雜訊地板上,欄數過多/樣本過短無法排除過擬合。",
               "capped_escape")
-        score -= 14
+        _bump("capped_escape_fail_closed", -14.0)
         real = False  # 誠實降級:至少不 likely-real(視其他訊號落在 inconclusive/overfit)
 
     # --- PBO ---
@@ -486,13 +539,13 @@ def _verdict(signals: dict) -> dict:
             _reason(f"回測過配機率(PBO)={pbo:.2f} > 0.50:樣本內選到的最佳者,樣本外多半墊底——典型過擬合特徵。",
                     "pbo_high", pbo=float(pbo))
             _flag(f"PBO={pbo:.2f} > 0.50。", "pbo_high", pbo=float(pbo))
-            score -= 20
+            _bump("pbo_high", -20.0)
             overfit = True
             real = False
         else:
             _reason(f"回測過配機率(PBO)={pbo:.2f} ≤ 0.50:樣本內贏家在樣本外沒有系統性崩盤。",
                     "pbo_ok", pbo=float(pbo))
-            score += 10
+            _bump("pbo_ok", 10.0)
     # returns 模式無 PBO,不扣分
 
     # --- permutation null ---
@@ -501,17 +554,17 @@ def _verdict(signals: dict) -> dict:
             _reason(f"隨機重排檢定 p={perm_p:.2f} > 0.50:把報酬時序打亂後,一半以上的隨機版本夏普不輸真實——沒看到真訊號。",
                     "perm_noise", p=float(perm_p))
             _flag(f"permutation p={perm_p:.2f} > 0.50。", "perm_noise", p=float(perm_p))
-            score -= 18
+            _bump("perm_noise", -18.0)
             overfit = True
             real = False
         elif perm_pass:
             _reason(f"隨機重排檢定 p={perm_p:.2f}:真實夏普勝過 95% 的隨機打亂版本,時序結構帶了資訊。",
                     "perm_pass", p=float(perm_p))
-            score += 14
+            _bump("perm_pass", 14.0)
         else:
             _reason(f"隨機重排檢定 p={perm_p:.2f}:未勝過隨機 p95 門檻,訊號不夠乾淨。",
                     "perm_below_threshold", p=float(perm_p))
-            score -= 4
+            _bump("perm_below_threshold", -4.0)
             real = False
 
     # --- 成本 ×3 ---
@@ -519,12 +572,12 @@ def _verdict(signals: dict) -> dict:
         if cost3 > 0:
             _reason(f"成本壓力 ×3 後夏普={cost3:.2f} 仍為正:對交易成本有一定緩衝。",
                     "cost_x3_positive", sharpe=float(cost3))
-            score += 8
+            _bump("cost_x3_positive", 8.0)
         else:
             _reason(f"成本壓力 ×3 後夏普={cost3:.2f} ≤ 0:成本稍微保守就翻負,edge 恐被摩擦吃光。",
                     "cost_x3_negative", sharpe=float(cost3))
             _flag("成本 ×3 後夏普轉負。", "cost_x3_negative")
-            score -= 12
+            _bump("cost_x3_negative", -12.0)
             real = False
 
     # --- 贏基準 ---
@@ -534,11 +587,11 @@ def _verdict(signals: dict) -> dict:
             xc = f"(超額 CAGR {excess_cagr*100:+.1f}%)" if has_xc else ""
             _reason(f"夏普勝過基準{xc}:相對買進持有有加值。",
                     "bench_beaten", excess_cagr=(float(excess_cagr) if has_xc else None))
-            score += 8
+            _bump("bench_beaten", 8.0)
         else:
             _reason("夏普未勝過基準:相對買進持有沒有明顯優勢,先確認是否值得多做這些交易。",
                     "bench_not_beaten")
-            score -= 8
+            _bump("bench_not_beaten", -8.0)
             real = False
 
     # --- 集中度 ---
@@ -547,19 +600,19 @@ def _verdict(signals: dict) -> dict:
             _reason(f"報酬集中度={conc*100:.0f}%:最好那一期就貢獻近半以上報酬,績效靠少數暴衝,脆弱。",
                     "concentration_high", concentration=float(conc))
             _flag(f"單期集中度 {conc*100:.0f}% ≥ 40%。", "concentration_high", concentration=float(conc))
-            score -= 12
+            _bump("concentration_high", -12.0)
             real = False
         else:
             _reason(f"報酬集中度={conc*100:.0f}%:報酬分布相對均勻,不靠少數幾根。",
                     "concentration_ok", concentration=float(conc))
-            score += 4
+            _bump("concentration_ok", 4.0)
 
     # --- n_trials 懲罰 ---
     if n_trials and n_trials > 20:
         pen = min(15.0, 3.0 * np.log10(n_trials))
         _reason(f"你試了 {n_trials} 種參數:試越多,靠運氣撞到漂亮結果的機率越高,已按此扣分。",
                 "many_trials_penalty", n_trials=int(n_trials))
-        score -= pen
+        _bump("many_trials_penalty", -float(pen))
     elif n_trials and n_trials > 1:
         _reason(f"你試了 {n_trials} 種參數:已納入多重檢定校正(DSR)。",
                 "trials_corrected", n_trials=int(n_trials))
@@ -569,7 +622,15 @@ def _verdict(signals: dict) -> dict:
         _reason(f"樣本只有 {n_periods} 期:統計檢定力弱,任何結論都要打折看待。",
                 "sample_short", n_periods=int(n_periods))
         _flag(f"樣本過短(僅 {n_periods} 期)。", "sample_short", n_periods=int(n_periods))
-        score -= 8
+        _bump("sample_short", -8.0)
+
+    # --- 日曆跨度提醒(R12 MED:期數多 ≠ 時間長,2650 根 1 分 K 只有 ~0.04 年)---
+    #   誠實揭露年化數字是短窗外插;檢定力扣分已由 sample_short(期數)承擔,此處
+    #   刻意【不扣分】只照實告知,避免同一件事罰兩次(期數與跨度高度相關)。
+    if span_years is not None and np.isfinite(span_years) and span_years < 0.5:
+        _reason(f"資料日曆跨度僅 {span_years:.2f} 年(不到半年):年化夏普/CAGR/年化波動都是"
+                "把短窗表現外插成一整年,量級容易誇大——年化數字當方向參考就好,別當保證。",
+                "short_calendar_span", span_years=float(span_years))
 
     # --- 綜合判定 ---
     score = float(np.clip(score, 0, 100))
@@ -593,13 +654,16 @@ def _verdict(signals: dict) -> dict:
 
     return {"overall": overall, "score_0to100": round(score, 1),
             "reasons": reasons, "red_flags": red_flags,
-            "reasons_coded": reasons_coded, "red_flags_coded": red_flags_coded}
+            "reasons_coded": reasons_coded, "red_flags_coded": red_flags_coded,
+            "score_breakdown": score_breakdown}
 
 
 # ===========================================================================
 # 7. 統一入口
 # ===========================================================================
-def _infer_ppy(dates, fallback):
+def _infer_ppy(dates, fallback, warn=None):
+    """由日期推年化頻率。warn=可選 (zh, code, **params) 回呼:解析失敗回退 252 時誠實告警
+    (修 R12 LOW:舊版裸 except 靜默吞掉壞日期,使用者不知道年化基準已悄悄變 252)。"""
     if fallback:
         return float(fallback)
     if dates and len(dates) > 2:
@@ -623,8 +687,12 @@ def _infer_ppy(dates, fallback):
                     tdays_per_year = 365.0 * n_days / span_days if span_days > 0 else 252.0
                     return float(np.clip(round(bars_per_day * tdays_per_year), 1, 600000))
                 return float(np.clip(round(365.0 / avg_days), 1, 35040))
-        except Exception:
-            pass
+        except Exception as exc:
+            # 日期壞掉 → 回退 252,但【必須】告警(修 R12 LOW:不再靜默吞錯)
+            if warn is not None:
+                warn(f"日期欄解析失敗({type(exc).__name__}):年化頻率回退為 252(日頻)。"
+                     "若你的資料不是日頻,年化夏普/CAGR 會失真——請修正日期格式或明示 periods_per_year。",
+                     "ppy_fallback", error=type(exc).__name__)
     return 252.0
 
 
@@ -643,7 +711,7 @@ def analyze(payload: dict) -> dict:
     mode = payload.get("mode", "returns")
     dates = payload.get("dates")
     n_trials = int(payload.get("n_trials") or 1)
-    ppy = _infer_ppy(dates, payload.get("periods_per_year"))
+    ppy = _infer_ppy(dates, payload.get("periods_per_year"), warn=_warn)
     bench_ret = payload.get("benchmark_returns")
     cost_bps = payload.get("cost_bps_per_turnover")
     turnover = payload.get("turnover")
@@ -657,7 +725,7 @@ def analyze(payload: dict) -> dict:
                     "metrics": {}, "verdict": {"overall": "inconclusive",
                     "score_0to100": 0, "reasons": ["無資料"], "red_flags": [],
                     "reasons_coded": [{"code": "no_data", "params": {}}],
-                    "red_flags_coded": []}}
+                    "red_flags_coded": [], "score_breakdown": []}}
         names = list(matrix.keys())
         cols = [np.asarray(matrix[k], dtype=float) for k in names]
         T = min(len(c) for c in cols)
@@ -694,7 +762,7 @@ def analyze(payload: dict) -> dict:
                     "metrics": {}, "verdict": {"overall": "inconclusive",
                     "score_0to100": 0, "reasons": ["無資料"], "red_flags": [],
                     "reasons_coded": [{"code": "no_data", "params": {}}],
-                    "red_flags_coded": []}}
+                    "red_flags_coded": [], "score_breakdown": []}}
         names, mat = None, None
         trial_sharpes = np.array([_sharpe_periodic(returns)])
         harden_diag = None  # returns 模式不硬化(硬化只在 matrix)
@@ -702,6 +770,20 @@ def analyze(payload: dict) -> dict:
     n = returns.size
     if n < 30:
         _warn(f"樣本僅 {n} 期,統計檢定力弱,結論僅供參考。", "short_sample", n=int(n))
+
+    # ---- 日曆跨度檢查(R12 MED):樣本警告只看期數會漏掉「期數多、時間短」的日內資料——
+    #      2650 根 1 分 K 只有 ~0.04 年,年化數字全是外插。span<0.5 年 → 誠實告警。----
+    span_years = None
+    if dates and len(dates) > 2:
+        try:
+            _idx = pd.to_datetime(pd.Series(dates))
+            span_years = float((_idx.iloc[-1] - _idx.iloc[0]).total_seconds()) / (86400.0 * 365.25)
+        except Exception:
+            span_years = None  # 日期壞掉的告警已由 _infer_ppy 的 ppy_fallback 承擔,不重複
+    if span_years is not None and np.isfinite(span_years) and span_years < 0.5:
+        _warn(f"資料日曆跨度僅 {span_years:.2f} 年(不到 0.5 年):所有年化數字(年化夏普/"
+              "CAGR/年化波動)都是把短窗表現外插成一整年,參考性有限——建議累積至少半年再看年化。",
+              "short_calendar_span", span_years=float(span_years))
 
     # ---- 長序列效能守衛(日內資料 >50k 期:permutation/bootstrap 在瀏覽器會拖垮)----
     #   誠實揭露:重抽次數降低只讓 p 值解析度變粗(p 的最小刻度 = 1/(n_perm+1)),
@@ -721,7 +803,10 @@ def analyze(payload: dict) -> dict:
     sr_annual = metrics["sharpe"]
     dsr = {"sr_annual": sr_annual, "sr0": float(dsr_res["sr0_daily"] * np.sqrt(ppy)),
            "dsr_prob": dsr_res["dsr"], "p_value": dsr_res["p_value"], "n_trials": n_trials,
-           "harden": harden_diag}  # matrix 硬化診斷(returns 模式為 None)
+           "harden": harden_diag,  # matrix 硬化診斷(returns 模式為 None)
+           # R12 HIGH 修:returns 模式 n_trials>1 無真試驗池 → 試驗離散度用 SE(SR)² 保守
+           # proxy 做【真通縮】(舊版 variance=0 → sr0≡0 → n_trials 無效)。誠實揭露之。
+           "sr_var_proxy": bool(dsr_res.get("sr_variance_proxy", False))}
 
     # ---- permutation null ----
     perm = permutation_null(returns, ppy, n_perm=n_perm_eff)
@@ -770,6 +855,8 @@ def analyze(payload: dict) -> dict:
         "concentration": metrics["top_bar_concentration"],
         "n_trials": n_trials, "n_periods": n, "real_sharpe": perm["real_sharpe"],
         "capped_escape": bool(harden_diag["capped_escape"]) if harden_diag else False,
+        "dsr_var_proxy": bool(dsr_res.get("sr_variance_proxy", False)),
+        "calendar_span_years": span_years,
     })
 
     # ---- equity curves ----
@@ -786,3 +873,170 @@ def analyze(payload: dict) -> dict:
         "benchmark_compare": bench_cmp, "verdict": verdict,
         "equity_curve": equity_curve, "benchmark_curve": bench_curve,
     }
+
+
+# ===========================================================================
+# 8. 權威偵測與轉換(E2/R12 MED:前端偵測下沉)
+#    JS 端的「淨值 vs 報酬」heuristic 與民國年正規化原本零測試、默默轉換資料。
+#    此節把兩者下沉到引擎:app.js 照舊先偵測(當 UI 即時提示),但 payload 多帶
+#    raw{values|matrix, dates, js_kind(s)};analyze 前先過 detect_and_convert,
+#    由 Python(pytest 釘死)重做權威偵測與轉換,與 JS hint 不一致時 warning 告知。
+#    數字解析(%、千分位、全形)仍在 JS(確定性字串處理);風險集中的【判斷】在這裡。
+#    ★本節為獨立追加區段(檔尾),不動上方 DSR/FWER/analyze 任何一行。★
+# ===========================================================================
+import re as _re
+
+_DATE_HEAD_RE = _re.compile(r"^(\d{3,4})[-/.](\d{1,2})[-/.](\d{1,2})([T ]\d{1,2}:\d{2}(?::\d{2})?)?")
+_DATE_YMD8_RE = _re.compile(r"^(\d{4})(\d{2})(\d{2})$")
+
+
+def normalize_date_str(s) -> str:
+    """單一日期字串 → ISO(民國年→西元;YYYYMMDD→ISO;日內時間戳保留時間)。
+    與 app.js normalizeDate 同語意的權威版:3 位年或 1<年<1911 視為民國年 +1911。
+    解析不了原樣返回(讓 _infer_ppy 的 pd.to_datetime 再試/失敗自然退回 252)。"""
+    s = str(s).strip()
+    m = _DATE_HEAD_RE.match(s)
+    if m:
+        y = int(m.group(1))
+        if len(m.group(1)) == 3 or (1 < y < 1911):
+            y += 1911
+        tm = m.group(4)
+        tm = (" " + tm[1:]) if tm else ""   # 去掉開頭的 'T' 或空白,統一單一空白
+        return f"{y}-{int(m.group(2)):02d}-{int(m.group(3)):02d}{tm}"
+    m = _DATE_YMD8_RE.match(s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return s
+
+
+def _finite_list(vals) -> list:
+    """JSON 來的 list(可含 None/NaN/字串數字)→ 只留有限 float。"""
+    out = []
+    for v in (vals or []):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(f):
+            out.append(f)
+    return out
+
+
+def detect_series_kind(vals) -> str:
+    """一欄數值是「報酬」還是「淨值」的權威偵測(與 app.js detectSeriesKind 同判準):
+    - 有限值 <3 → 'returns'(資訊不足,保守不轉換)
+    - |max|<1.5 且有負值 → 'returns'(典型漲跌幅)
+    - 全正且(|max|>3 或單調比例>0.55)→ 'nav'
+    - 全正且單調比例>0.6 → 'nav'(1.0x 附近的淨值)
+    - 其餘 → 'returns'(含【負淨值】邊界:出現負值且量級大 → 不當淨值轉換,
+      因 nav→returns 對跨零序列會產生無意義的爆炸報酬;照 returns 處理並由檢定自然懲罰)"""
+    clean = _finite_list(vals)
+    if len(clean) < 3:
+        return "returns"
+    abs_max = max(abs(v) for v in clean)
+    any_neg = any(v < 0 for v in clean)
+    all_pos = all(v > 0 for v in clean)
+    up = sum(1 for i in range(1, len(clean)) if clean[i] >= clean[i - 1])
+    mono = up / (len(clean) - 1)
+    if abs_max < 1.5 and any_neg:
+        return "returns"
+    if all_pos and (abs_max > 3 or mono > 0.55):
+        return "nav"
+    if all_pos and mono > 0.6:
+        return "nav"
+    return "returns"
+
+
+def nav_to_returns(vals) -> list:
+    """淨值 → 逐期報酬(與 app.js navToReturns 同語意):首期 0;前值非有限或 0 → 該期 0。
+    輸入先做 NaN/None→0 清洗(與 JS clean 一致)。"""
+    clean = []
+    for v in (vals or []):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            f = 0.0
+        clean.append(f if np.isfinite(f) else 0.0)
+    out = [0.0]
+    for i in range(1, len(clean)):
+        prev = clean[i - 1]
+        out.append(clean[i] / prev - 1.0 if (np.isfinite(prev) and prev != 0.0) else 0.0)
+    return out
+
+
+def _clean_returns(vals) -> list:
+    """報酬欄清洗:NaN/None/不可解析 → 0(與 JS clean 一致)。"""
+    out = []
+    for v in (vals or []):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            f = 0.0
+        out.append(f if np.isfinite(f) else 0.0)
+    return out
+
+
+def detect_and_convert(payload: dict) -> dict:
+    """analyze 前的權威偵測/轉換層。純函數:回【新 dict】,不改入參。
+
+    契約:
+    - payload 無 "raw"(舊呼叫方/測試直接餵 returns/matrix)→ 原樣返回,零行為改變。
+    - payload["raw"] = {values|matrix, dates, js_kind|js_kinds} 時:
+        * dates:逐筆 normalize_date_str(民國年→西元等),【覆蓋】payload["dates"];
+          與前端已正規化的 dates 不一致 → warning(code=detect_dates_mismatch)。
+        * returns 模式:raw.values 重偵測 kind、重轉換,【覆蓋】payload["returns"];
+          與 js_kind 不一致 → warning(code=detect_kind_mismatch)。
+        * matrix 模式:raw.matrix 逐欄同上,【覆蓋】payload["matrix"]。
+    - 偵測層 warnings 放 payload["_detect_warnings"] / ["_detect_warnings_coded"]
+      (與引擎 warnings 同結構,呼叫方自行併入 analyze 輸出)。"""
+    raw = payload.get("raw")
+    if not isinstance(raw, dict):
+        return payload
+
+    p = dict(payload)
+    warns, warns_coded = [], []
+
+    def _warn(zh: str, code: str, **params):
+        warns.append(zh)
+        warns_coded.append({"code": code, "params": params})
+
+    # ---- 日期:引擎正規化為權威 ----
+    rdates = raw.get("dates")
+    if rdates:
+        pdates = [normalize_date_str(d) for d in rdates]
+        js_dates = payload.get("dates")
+        if js_dates is not None:
+            js_list = [str(d) for d in js_dates]
+            n_diff = sum(1 for a, b in zip(js_list, pdates) if a != b) + abs(len(js_list) - len(pdates))
+            if n_diff:
+                _warn(f"日期正規化:引擎與前端有 {n_diff} 筆不一致(民國年/格式處理),已以引擎(Python)結果為準。",
+                      "detect_dates_mismatch", n_diff=int(n_diff))
+        p["dates"] = pdates
+
+    def _authoritative(vals, js_hint, col=None):
+        kind = detect_series_kind(vals)
+        if js_hint in ("nav", "returns") and js_hint != kind:
+            _warn((f"欄「{col}」" if col else "") + f"序列型別偵測不一致:前端判「{js_hint}」、引擎權威判「{kind}」,"
+                  f"已以引擎({kind})為準做{'淨值→報酬轉換' if kind == 'nav' else '逐期報酬處理'}——請肉眼確認你的資料型別。",
+                  "detect_kind_mismatch", col=col, js=js_hint, py=kind)
+        return nav_to_returns(vals) if kind == "nav" else _clean_returns(vals), kind
+
+    mode = payload.get("mode", "returns")
+    if mode == "matrix":
+        rmat = raw.get("matrix")
+        if isinstance(rmat, dict) and rmat:
+            js_kinds = raw.get("js_kinds") or {}
+            new_mat = {}
+            for name, vals in rmat.items():
+                conv, _ = _authoritative(vals, js_kinds.get(name), col=name)
+                new_mat[name] = conv
+            p["matrix"] = new_mat
+    else:
+        rvals = raw.get("values")
+        if rvals:
+            conv, _ = _authoritative(rvals, raw.get("js_kind"))
+            p["returns"] = conv
+
+    p["_detect_warnings"] = warns
+    p["_detect_warnings_coded"] = warns_coded
+    return p

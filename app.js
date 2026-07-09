@@ -54,7 +54,7 @@ const STRINGS = {
       + '然後用一整套學界標準的統計檢定,試著反駁你。過得了關的,才可能是真 edge;過不了的,'
       + '恭喜你在賠真錢之前就知道了。',
     hero_chip1: '資料不離開你的瀏覽器',
-    hero_chip2: '七道誠實統計閘',
+    hero_chip2: '最多七道統計閘,依資料啟用',
     hero_chip3: '純靜態,零後端上傳',
 
     // —— STEP 01 上傳 ——
@@ -86,7 +86,7 @@ const STRINGS = {
     param_ppy_4: '季 = 4',
     param_ppy_sub: '無日期欄時,預設 252。',
     param_bench_label: '對照基準',
-    param_bench_hint: '拿一條被動基準跟你的策略比。基準會依你資料的日期對齊;日期不重疊時退化成長度對齊並提示。',
+    param_bench_hint: '拿一條被動基準跟你的策略比。基準依你資料的【日期交集】對齊(缺日不以 0 填補);交集不足 80% 時誠實略過比較並提示,不放水。',
     param_bench_none: '不比較',
     param_bench_desc: '選一條看你有沒有贏過無腦買進持有。',
 
@@ -126,8 +126,8 @@ const STRINGS = {
     metrics_h: '風險調整後績效',
     metrics_p: '這些是原始績效數字(不含誠實性校正)——好看的數字容易騙人,所以上面那句白話結論才是重點。',
     gates_no: 'GATES / 統計檢定',
-    gates_h: '七道誠實閘的細節',
-    gates_p: 'DSR(通縮夏普)、隨機重排、PBO、SPA/Romano–Wolf、成本壓力、對照基準——上方三個白話重點就是從這幾道閘翻譯來的。',
+    gates_h: '統計閘的細節(最多七道,依資料形態啟用)',
+    gates_p: 'DSR(通縮夏普)與隨機重排必跑;PBO、SPA/Romano–Wolf 需多策略矩陣;成本壓力需換手率、對照基準需你選一條。未啟用的閘標「略過」——略過不算通過。上方白話重點就是從這幾道閘翻譯來的。',
     charts_no: 'SCOPE / 視覺化',
     charts_h: '看得見的證據',
     chart_equity_h: '淨值曲線 vs 對照基準',
@@ -137,15 +137,15 @@ const STRINGS = {
 
     // —— 方法論 ——
     method_no: 'METHODOLOGY / 方法論',
-    method_h: '七道閘,各擋什麼騙局',
-    method_p: '這套裁判制度萃取自一座量化策略農場(4,800+ 次試驗、0 個通過誠實樣本外驗證)。它的存在就是為了在你把錢放進過擬合的回測前攔下你。',
+    method_h: '最多七道閘,各擋什麼騙局',
+    method_p: '這套裁判制度萃取自一座量化策略農場(4,800+ 次試驗、0 個通過誠實樣本外驗證——<a href="https://github.com/hades60414-sys/edge-validator/blob/master/docs/trial-graveyard.md" target="_blank" rel="noopener">完整佐證與記帳方式</a>)。它的存在就是為了在你把錢放進過擬合的回測前攔下你。並非每次七道全跑:依你給的資料形態啟用,略過不算通過。',
     m1_h: '通縮夏普', m1_p: '扣掉「你試了幾種參數才挑到這條曲線」的運氣成分。試越多,門檻越高。',
     m2_h: '回測過配機率 PBO', m2_p: '樣本內選到的最佳者,樣本外還站得住嗎?墊底的機率就是過擬合機率(僅矩陣模式)。',
     m3_h: 'Hansen 優越性檢定', m3_p: '資料挖掘後,你的策略真的贏過基準嗎?控制家族誤差(僅矩陣模式)。',
     m4_h: 'Romano–Wolf 篩選', m4_p: '多重比較修正後,還能倖存的候選有幾個(僅矩陣模式)。',
     m5_h: '成本壓力測試', m5_p: '手續費/滑價 ×1 / ×3 / ×6 後,夏普還正嗎?edge 常被摩擦吃光(需提供換手率)。',
     m6_h: '隨機重排檢定', m6_p: '抹掉漂移、保留波動,重排上千次。你贏得過隨機打亂的版本嗎?',
-    m7_h: '對照基準', m7_p: 'vs 0050 定期定額 / 農場的誠實 beta 策略。相對無腦買進持有,你有加值嗎?',
+    m7_h: '對照基準', m7_p: 'vs 0050 定期定額 / 農場的誠實 beta 策略。相對無腦買進持有,你有加值嗎?(需選基準)',
     m8_h: '綜合判決', m8_p: '三態:<b style="color:var(--real)">可能真實</b> / <b style="color:var(--incon)">結論不明</b> / <b style="color:var(--overfit)">疑似過擬合</b>。過關≠會賺。',
 
     // —— 免責 / 頁尾 ——
@@ -187,9 +187,12 @@ const STRINGS = {
     note_single_nav: '單策略(淨值→報酬)。',
     note_matrix: (n) => `偵測為 ${n} 策略矩陣。將啟用 PBO / SPA / Romano-Wolf 全套閘;主序列取樣本內夏普最高者。`,
     // —— 基準對齊提示 ——
-    align_bydate: (hit, len) => `基準依日期對齊(${hit}/${len} 日命中)。`,
-    align_len_nodate_overlap: '基準日期與你的資料不重疊,改用長度對齊(取基準最近一段),僅供概略對照。',
-    align_len_nodate: '你的資料無日期欄,基準以長度對齊(取基準最近一段),僅供概略對照。',
+    align_bydate_intersect: (hit, len) => `基準依日期【交集】對齊(${hit}/${len} 日兩邊都有;缺日直接略過、不以 0 填補,避免稀釋基準)。`,
+    align_skip_overlap: (hit, len) => `基準日期交集不足(${hit}/${len} 日,低於 80%):為避免以 0 填補稀釋基準、讓「贏過基準」變太容易,本次【略過】基準比較。`,
+    align_len_nodate_overlap: '基準日期與你的資料不重疊,改用長度對齊(取基準最近的等長一段,無填補),僅供概略對照。',
+    align_len_nodate: '你的資料無日期欄,基準以長度對齊(取基準最近的等長一段,無填補),僅供概略對照。',
+    align_len_partial: (blen, len) => `你的資料無日期欄且基準較短(${blen}/${len} 期):以基準全段對照、不補 0,僅供概略對照。`,
+    align_skip_short: (blen, len) => `基準長度不足(${blen}/${len} 期,低於 80%)且無日期可交集:本次【略過】基準比較(不以 0 填補灌長度)。`,
     // —— 錯誤(解析) ——
     perr_too_few: '檔案內容太少:至少需要一列標題(可略)加幾列資料。',
     perr_body_few: '資料列太少(去掉標題後不足 2 列)。請確認每列是一期報酬或淨值。',
@@ -241,6 +244,7 @@ const STRINGS = {
     // —— permutation 閘 ——
     g_perm_title: '隨機重排檢定', g_perm_sub: 'Matched-null · block-bootstrap',
     g_perm_note: (n) => `抹掉漂移、保留波動,bootstrap ${n} 次。你的真實夏普要贏過 95% 的隨機版本才算過。`,
+    g_perm_matrix_caveat: '注意:矩陣模式下此閘只檢「挑出的最佳欄」那一條序列,對「挑最好那欄」的選擇偏誤會失真(偏樂觀)——即使這裡顯示「不像純運氣」,矩陣模式請以 FWER/PBO 為準。',
     g_perm_real: '真實年化夏普', g_perm_p95: '隨機 95 百分位', g_perm_p: 'p 值(越低越真)',
     // —— PBO 閘 ——
     g_pbo_title: '回測過配機率 PBO', g_pbo_sub: 'CSCV · 樣本內外一致性',
@@ -288,8 +292,9 @@ const STRINGS = {
     pt_perm_noise: (p) => `<b>贏得過隨機打亂嗎:沒贏。</b>把報酬順序隨機洗牌後,超過一半的洗牌版本都能刷出跟你一樣好的成績(p=${p})——這很像是雜訊。`,
     pt_perm_mid: (p) => `<b>贏得過隨機打亂嗎:沒到門檻。</b>你的成績比多數隨機洗牌版本好,但還沒好到能穩穩勝過 95%(p=${p})。`,
     pt_perm_na: '<b>贏得過隨機打亂嗎:</b>樣本太短,沒能做隨機重排檢定。',
-    // ② DSR
+    // ② DSR(clause 三態:真試驗池 / SR 標準誤保守通縮 proxy(單序列宣稱 n_trials>1)/ 單條)
     pt_dsr_trial_multi: (n) => `扣掉你試了 ${n} 種參數的運氣後`,
+    pt_dsr_trial_multi_proxy: (n) => `以 SR 估計標準誤作試驗離散度的保守下限、通縮「試了 ${n} 種參數」的運氣後(單一序列無真試驗池)`,
     pt_dsr_trial_single: '你只丟了一條曲線(當作沒調參)',
     pt_dsr_high: (clause, prob) => `<b>扣掉「試很多次」的運氣後還站得住嗎:站得住。</b>${clause},真有 edge 的機率約 ${prob}——高信心。`,
     pt_dsr_mid: (clause, prob) => `<b>扣掉「試很多次」的運氣後還站得住嗎:勉強站上雜訊地板。</b>${clause},真有 edge 的機率約 ${prob}(過了 60% 的雜訊地板,但沒到 95% 高信心)。`,
@@ -335,7 +340,7 @@ const STRINGS = {
       + '<strong>assumes your strategy is fake</strong>, then throws a full battery of academic-grade statistical tests at it, trying to disprove you. '
       + "What survives might be a real edge; what doesn't — congratulations, you found out before betting real money.",
     hero_chip1: 'Your data never leaves the browser',
-    hero_chip2: 'Seven honest statistical gates',
+    hero_chip2: 'Up to seven statistical gates, enabled by your data',
     hero_chip3: 'Fully static, zero backend upload',
 
     // —— STEP 01 upload ——
@@ -367,7 +372,7 @@ const STRINGS = {
     param_ppy_4: 'Quarterly = 4',
     param_ppy_sub: 'Defaults to 252 when there is no date column.',
     param_bench_label: 'Benchmark',
-    param_bench_hint: 'Compare your strategy against a passive benchmark. It aligns to your data by date; when dates don\'t overlap it falls back to length-alignment with a note.',
+    param_bench_hint: 'Compare your strategy against a passive benchmark. It aligns on the DATE INTERSECTION of your data (missing days are never zero-filled); if the intersection covers less than 80%, the comparison is honestly skipped with a note — no fudging.',
     param_bench_none: 'No comparison',
     param_bench_desc: 'Pick one to see whether you beat naive buy-and-hold.',
 
@@ -407,8 +412,8 @@ const STRINGS = {
     metrics_h: 'Risk-adjusted performance',
     metrics_p: 'These are the raw performance numbers (before any honesty correction) — pretty numbers lie easily, which is why the plain-English verdict above is what matters.',
     gates_no: 'GATES',
-    gates_h: 'The seven honest gates, in detail',
-    gates_p: 'DSR (Deflated Sharpe), permutation shuffle, PBO, SPA/Romano–Wolf, cost stress, benchmark — the three plain-English points above are translated straight from these gates.',
+    gates_h: 'The gates in detail (up to seven, enabled by your data)',
+    gates_p: 'DSR (Deflated Sharpe) and the permutation shuffle always run; PBO and SPA/Romano–Wolf need a multi-strategy matrix; cost stress needs turnover and the benchmark needs you to pick one. Gates that don\'t apply are marked "skipped" — a skip never counts as a pass. The plain-English points above are translated straight from these gates.',
     charts_no: 'SCOPE',
     charts_h: 'Evidence you can see',
     chart_equity_h: 'Equity curve vs benchmark',
@@ -418,15 +423,15 @@ const STRINGS = {
 
     // —— methodology ——
     method_no: 'METHODOLOGY',
-    method_h: 'Seven gates, each catching a different con',
-    method_p: 'This referee system is distilled from a quant strategy farm (4,800+ trials, 0 survivors of honest out-of-sample validation). Its whole reason to exist is to stop you before you put money into an overfit backtest.',
+    method_h: 'Up to seven gates, each catching a different con',
+    method_p: 'This referee system is distilled from a quant strategy farm (4,800+ trials, 0 survivors of honest out-of-sample validation — <a href="https://github.com/hades60414-sys/edge-validator/blob/master/docs/trial-graveyard.md" target="_blank" rel="noopener">full evidence and how that number is accounted for</a>). Its whole reason to exist is to stop you before you put money into an overfit backtest. Not all seven run every time: gates engage based on the data you provide, and a skip never counts as a pass.',
     m1_h: 'Deflated Sharpe', m1_p: 'Strips out the luck of "how many parameters you tried before picking this curve." The more you tried, the higher the bar.',
     m2_h: 'Backtest overfitting prob. (PBO)', m2_p: 'Does the in-sample winner still hold up out-of-sample? The probability it ends up worst is the overfitting probability (matrix mode only).',
     m3_h: 'Hansen superiority test', m3_p: 'After all that data mining, does your strategy genuinely beat the benchmark? Controls family-wise error (matrix mode only).',
     m4_h: 'Romano–Wolf screening', m4_p: 'After multiple-comparison correction, how many candidates actually survive (matrix mode only).',
     m5_h: 'Cost stress test', m5_p: 'With fees/slippage at ×1 / ×3 / ×6, is the Sharpe still positive? Edges are often eaten alive by friction (requires turnover).',
     m6_h: 'Permutation shuffle test', m6_p: 'Kill the drift, keep the volatility, reshuffle thousands of times. Can you beat the randomly shuffled versions?',
-    m7_h: 'Benchmark', m7_p: 'vs 0050 monthly DCA / the farm\'s honest beta strategies. Relative to naive buy-and-hold, did you add anything?',
+    m7_h: 'Benchmark', m7_p: 'vs 0050 monthly DCA / the farm\'s honest beta strategies. Relative to naive buy-and-hold, did you add anything? (requires picking a benchmark)',
     m8_h: 'Composite verdict', m8_p: 'Three states: <b style="color:var(--real)">Likely real</b> / <b style="color:var(--incon)">Inconclusive</b> / <b style="color:var(--overfit)">Likely overfit</b>. Passing ≠ profit.',
 
     // —— disclaimer / footer ——
@@ -468,9 +473,12 @@ const STRINGS = {
     note_single_nav: 'Single strategy (equity → returns).',
     note_matrix: (n) => `Detected as a ${n}-strategy matrix. The full PBO / SPA / Romano-Wolf gates are enabled; the primary series is the one with the highest in-sample Sharpe.`,
     // —— benchmark alignment notes ——
-    align_bydate: (hit, len) => `Benchmark aligned by date (${hit}/${len} days matched).`,
-    align_len_nodate_overlap: "The benchmark dates don't overlap yours; fell back to length-alignment (benchmark's most recent stretch), rough comparison only.",
-    align_len_nodate: 'Your data has no date column, so the benchmark is length-aligned (its most recent stretch), rough comparison only.',
+    align_bydate_intersect: (hit, len) => `Benchmark aligned on the date INTERSECTION (${hit}/${len} days present on both sides; missing days are dropped, never zero-filled, to avoid diluting the benchmark).`,
+    align_skip_overlap: (hit, len) => `Benchmark date intersection too thin (${hit}/${len} days, under 80%): rather than zero-fill the gaps (which dilutes the benchmark and makes "beats benchmark" too easy), the comparison is SKIPPED this run.`,
+    align_len_nodate_overlap: "The benchmark dates don't overlap yours; fell back to length-alignment (the benchmark's most recent equally-long stretch, no padding), rough comparison only.",
+    align_len_nodate: "Your data has no date column, so the benchmark is length-aligned (its most recent equally-long stretch, no padding), rough comparison only.",
+    align_len_partial: (blen, len) => `Your data has no date column and the benchmark is shorter (${blen}/${len} periods): the benchmark's full stretch is used as-is, no zero-padding — rough comparison only.`,
+    align_skip_short: (blen, len) => `Benchmark too short (${blen}/${len} periods, under 80%) with no dates to intersect: the comparison is SKIPPED this run (no zero-padding to fake the length).`,
     // —— parse errors ——
     perr_too_few: 'Too little content: at least one header row (optional) plus a few data rows are needed.',
     perr_body_few: 'Too few data rows (fewer than 2 after removing the header). Make sure each row is one period of return or equity.',
@@ -522,6 +530,7 @@ const STRINGS = {
     // —— permutation gate ——
     g_perm_title: 'Permutation shuffle test', g_perm_sub: 'Matched-null · block-bootstrap',
     g_perm_note: (n) => `Drift removed, volatility kept, bootstrapped ${n} times. Your real Sharpe must beat 95% of the random versions to pass.`,
+    g_perm_matrix_caveat: 'Note: in matrix mode this gate only tests the single best-picked column, so it is distorted (optimistic) with respect to the selection bias of "picking the best column" — even if it reads "not pure luck" here, defer to FWER/PBO in matrix mode.',
     g_perm_real: 'Real ann. Sharpe', g_perm_p95: 'Random 95th pct', g_perm_p: 'p-value (lower = more real)',
     // —— PBO gate ——
     g_pbo_title: 'Backtest overfit prob. (PBO)', g_pbo_sub: 'CSCV · in/out-of-sample consistency',
@@ -569,12 +578,14 @@ const STRINGS = {
     pt_perm_noise: (p) => `<b>Beats random shuffling? No.</b> After reshuffling your return order, over half the shuffled versions match your result (p=${p}) — this looks a lot like noise.`,
     pt_perm_mid: (p) => `<b>Beats random shuffling? Not to threshold.</b> Your result beats most shuffled versions, but not cleanly enough to clear 95% (p=${p}).`,
     pt_perm_na: '<b>Beats random shuffling?</b> Sample too short to run the permutation test.',
-    // ② DSR
-    pt_dsr_trial_multi: (n) => `after stripping out the luck of trying ${n} parameter sets`,
-    pt_dsr_trial_single: 'only one curve handed in (treated as no tuning)',
-    pt_dsr_high: (clause, prob) => `<b>Still holds after removing "many tries" luck? Yes.</b> With ${clause}, the probability of a real edge is about ${prob} — high confidence.`,
-    pt_dsr_mid: (clause, prob) => `<b>Still holds after removing "many tries" luck? Barely, above the noise floor.</b> With ${clause}, the probability of a real edge is about ${prob} (past the 60% noise floor, but short of 95% high confidence).`,
-    pt_dsr_low: (clause, prob) => `<b>Still holds after removing "many tries" luck? No.</b> With ${clause}, the probability of a real edge drops to about ${prob} — this pretty number is mostly cherry-picked luck.`,
+    // ② DSR — clauses are full sentence-openers (capitalized); templates no longer prepend
+    // "With " (the old assembly produced "With after stripping out…" — R12 LOW fix).
+    pt_dsr_trial_multi: (n) => `After stripping out the luck of trying ${n} parameter sets`,
+    pt_dsr_trial_multi_proxy: (n) => `After conservatively deflating for the luck of trying ${n} parameter sets — using the Sharpe-ratio standard error as a lower bound on trial dispersion, since a single series carries no true trial pool`,
+    pt_dsr_trial_single: 'With only one curve handed in (treated as no tuning)',
+    pt_dsr_high: (clause, prob) => `<b>Still holds after removing "many tries" luck? Yes.</b> ${clause}, the probability of a real edge is about ${prob} — high confidence.`,
+    pt_dsr_mid: (clause, prob) => `<b>Still holds after removing "many tries" luck? Barely, above the noise floor.</b> ${clause}, the probability of a real edge is about ${prob} (past the 60% noise floor, but short of 95% high confidence).`,
+    pt_dsr_low: (clause, prob) => `<b>Still holds after removing "many tries" luck? No.</b> ${clause}, the probability of a real edge drops to about ${prob} — this pretty number is mostly cherry-picked luck.`,
     pt_dsr_na: '<b>Still holds after removing "many tries" luck?</b> Not enough data to estimate the Deflated Sharpe.',
     // ③ benchmark
     pt_bench_win: (c) => `<b>Beats naive buy-and-hold? Yes.</b> On a risk-adjusted (Sharpe) basis it beats the passive benchmark${c} — real value added over just holding.`,
@@ -606,9 +617,17 @@ const STRINGS = {
     // 逐位 1:1)。EN 模式用這些模板渲染;zh 模式直接用引擎的中文字串(單一真源)。
     // 數字格式化刻意跟引擎 zh 字串同精度(dsr/pbo/p/sharpe 兩位、超額 CAGR ±一位、集中度整數%)。
     // reasons(rc_)
-    rc_dsr_high_confidence: (p) => `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: even after correcting for the multiple testing of ${p.n_trials} parameter trials, the probability of a real edge stays high.`,
-    rc_dsr_above_noise_floor: (p) => `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: above the 0.60 noise floor, but confidence is not top-tier — don't treat it as ironclad.`,
-    rc_dsr_below_noise_floor: (p) => `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)} < 0.60: after the multiple-testing correction, the odds of a real edge are under half — highly likely noise.`,
+    // var_proxy=true(引擎:單序列宣稱 n_trials>1、無真試驗池 → 以 SR 標準誤作試驗離散度
+    // 下限保守通縮)時,EN 文案照實渲染 proxy 語意,與引擎 zh 字串 1:1 同義。
+    rc_dsr_high_confidence: (p) => p.var_proxy
+      ? `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: a single series carries no true trial pool, so the Sharpe-ratio standard error is used as a conservative lower bound on trial dispersion to genuinely deflate for "${p.n_trials} parameter sets tried" — and the probability of a real edge still stays high (dispersion is a conservative proxy, not a true trial pool).`
+      : `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: even after correcting for the multiple testing of ${p.n_trials} parameter trials, the probability of a real edge stays high.`,
+    rc_dsr_above_noise_floor: (p) => p.var_proxy
+      ? `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: after a conservative deflation using the Sharpe-ratio standard error as the trial dispersion (single series, no true trial pool, trials=${p.n_trials}), it clears the 0.60 noise floor — but confidence is not top-tier; don't treat it as ironclad.`
+      : `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: above the 0.60 noise floor, but confidence is not top-tier — don't treat it as ironclad.`,
+    rc_dsr_below_noise_floor: (p) => p.var_proxy
+      ? `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)} < 0.60: after deflating the luck of "${p.n_trials} parameter sets tried" with the Sharpe-ratio standard error as trial dispersion, the odds of a real edge are under half — highly likely noise.`
+      : `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)} < 0.60: after the multiple-testing correction, the odds of a real edge are under half — highly likely noise.`,
     rc_dsr_not_computable: () => 'DSR could not be computed (insufficient sample or variance); excluded from the verdict.',
     rc_capped_escape_fail_closed: (p) => `Noise-hardening scaled the trial count to its cap (${p.n_trials}) and the Deflated Sharpe still hasn't dropped below the 0.60 noise floor — this usually means too many columns / too short a sample, so this in-sample winner is statistically indistinguishable from one lucky draw of noise. The engine fails closed: overfitting cannot be ruled out, so it is not called real.`,
     rc_pbo_high: (p) => `Probability of backtest overfitting (PBO)=${fmt(p.pbo, 2)} > 0.50: the in-sample best pick usually lands near the bottom out-of-sample — a classic overfitting signature.`,
@@ -625,6 +644,7 @@ const STRINGS = {
     rc_many_trials_penalty: (p) => `You tried ${p.n_trials} parameter sets: the more you try, the higher the odds of hitting a pretty result by luck — points deducted accordingly.`,
     rc_trials_corrected: (p) => `You tried ${p.n_trials} parameter sets: multiple-testing correction (DSR) has been applied.`,
     rc_sample_short: (p) => `Only ${p.n_periods} periods in the sample: statistical power is weak, so discount every conclusion.`,
+    rc_short_calendar_span: (p) => `The data spans only ${fmt(p.span_years, 2)} calendar years (under half a year): annualized Sharpe / CAGR / vol are a short window extrapolated to a full year and easily overstate the magnitude — treat annualized numbers as directional only, not a promise.`,
     rc_closing_likely_real: () => 'Important: passing these tests only means "no obvious overfitting was found" — it does not guarantee future profit. Before real money, always walk-forward validate and live-test at small size.',
     rc_closing_inconclusive: () => "Inconclusive: the evidence isn't enough to call it real or fake. Gather more samples or run a forward test before deciding.",
     rc_closing_likely_overfit: () => "Reminder: even if some metrics look good, the red flags above say this strategy is most likely an overfit artifact — don't bet real money on it.",
@@ -643,6 +663,12 @@ const STRINGS = {
     rw_fwer_not_computed: (p) => `FWER gates not computed: aligned sample has ${p.n_obs} periods, below the required ${p.min_obs}.`,
     rw_matrix_empty: () => 'Matrix mode, but the matrix is empty.',
     rw_returns_empty: () => 'Returns mode, but the returns series is empty.',
+    rw_short_calendar_span: (p) => `The data spans only ${fmt(p.span_years, 2)} calendar years (under 0.5): every annualized number (ann. Sharpe / CAGR / ann. vol) extrapolates a short window to a full year, so their usefulness is limited — accumulate at least half a year before reading annualized figures.`,
+    rw_long_series_guard: (p) => `Long series (${p.n} periods): permutation resamples reduced to ${p.n_perm} and bootstrap to ${p.n_boot} (browser performance guard; p-value resolution gets coarser, the test semantics are unchanged).`,
+    rw_ppy_fallback: (p) => `Date column failed to parse (${p.error}): annualization frequency fell back to 252 (daily). If your data is not daily, annualized Sharpe / CAGR will be distorted — fix the date format or set periods-per-year explicitly.`,
+    // 偵測下沉層(engine detect_and_convert)
+    rw_detect_kind_mismatch: (p) => `Series-type detection disagreed${p.col ? ` on column "${p.col}"` : ''}: the browser hinted "${p.js}" but the engine's authoritative check says "${p.py}". The engine's call (${p.py}) was used for the analysis — eyeball your data to make sure it really is ${p.py === 'nav' ? 'an equity/NAV curve' : 'per-period returns'}.`,
+    rw_detect_dates_mismatch: (p) => `Date normalization disagreed on ${p.n_diff} row(s) between the browser and the engine (ROC-calendar / format handling). The engine's (Python) normalization was used.`,
   },
 };
 
@@ -1067,6 +1093,9 @@ function parseCSV(text, srcName) {
   for (let i = 0; i < body.length; i++) { if (body[i].length > nCols) nCols = body[i].length; }
 
   // ---- 情況 A:單欄 → returns 或 nav ----
+  // rawValues / datesRaw / jsKind(s):偵測下沉(R12 MED)——JS 的 nav/returns 偵測與民國年
+  // 正規化只當【提示】,原始數值與原始日期字串一併送引擎,由 Python(有 pytest 釘死)重做
+  // 權威偵測與轉換;不一致時引擎以 warning 告知。
   if (nCols === 1) {
     const vals = body.map(r => parseNumberCell(r[0]));
     const good = vals.filter(isNum).length;
@@ -1078,6 +1107,7 @@ function parseCSV(text, srcName) {
       mode: 'returns', dates: null, returns, matrix: null, colNames: null,
       srcName, nRows: returns.length,
       noteKey: kind === 'nav' ? 'note_series_nav' : 'note_series_ret',
+      rawValues: vals, datesRaw: null, jsKind: kind,
     };
   }
 
@@ -1099,6 +1129,7 @@ function parseCSV(text, srcName) {
       mode: 'returns', dates, returns, matrix: null, colNames: null,
       srcName, nRows: returns.length,
       noteKey: kind === 'nav' ? 'note_dv_nav' : 'note_dv_ret',
+      rawValues: vals, datesRaw: col0.slice(), jsKind: kind,
     };
   }
 
@@ -1124,30 +1155,41 @@ function parseCSV(text, srcName) {
       mode: 'returns', dates, returns, matrix: null, colNames: null,
       srcName, nRows: returns.length,
       noteKey: kind === 'nav' ? 'note_single_nav' : 'note_single_ret',
+      rawValues: vals, datesRaw: hasDateCol ? col0.slice() : null, jsKind: kind,
     };
   }
 
-  // 真 matrix:每欄各自偵測 nav/returns
+  // 真 matrix:每欄各自偵測 nav/returns(rawMatrix/jsKinds 一併留存,供引擎權威重偵測)
   const matrix = {};
+  const rawMatrix = {};
+  const jsKinds = {};
   for (let ci = 0; ci < names.length; ci++) {
     const c = startCol + ci;
     const vals = body.map(r => parseNumberCell(r[c]));
     const kind = detectSeriesKind(vals);
     const clean = vals.map(v => isNum(v) ? v : 0);
     matrix[names[ci]] = kind === 'nav' ? navToReturns(clean) : clean;
+    rawMatrix[names[ci]] = vals;
+    jsKinds[names[ci]] = kind;
   }
   return {
     mode: 'matrix', dates, returns: null, matrix, colNames: names,
     srcName, nRows: body.length,
     noteKey: 'note_matrix', noteArgs: [names.length],
+    rawMatrix, datesRaw: hasDateCol ? col0.slice() : null, jsKinds,
   };
 }
 
 // ============================================================================
 // 4. 基準對齊
 // ============================================================================
-// 把選中基準的 returns 對齊到使用者資料。
-// 有日期 → 依日期交集對齊(逐日期查表);無日期 → 用尾端長度對齊。
+// 把選中基準的 returns 對齊到使用者資料。誠實原則(R12 HIGH 修):
+// 【絕不以 0 填補缺日】——補 0 會稀釋基準的波動與報酬,讓「贏過基準」變得太容易
+// (基準夏普被人為壓低,beats_bench 偏易觸發、判決被灌分)。
+// 有日期 → 只取【交集日期】(兩邊都有的日);交集覆蓋率 < ALIGN_MIN_COVER → 誠實 skip。
+// 無日期 → 基準夠長時取尾端等長一段;不夠長(覆蓋率 < 門檻)→ 誠實 skip,不補 0。
+const ALIGN_MIN_COVER = 0.8;
+
 function alignBenchmark(benchKey, userDates, userLen) {
   if (!benchKey || !State.baselines || !State.baselines[benchKey]) return { arr: null, noteKey: null, noteArgs: [] };
   const b = State.baselines[benchKey];
@@ -1155,30 +1197,39 @@ function alignBenchmark(benchKey, userDates, userLen) {
   const bRet = b.returns || [];
 
   if (userDates && bDates && bDates.length) {
-    // 建 date→return 查表,對使用者每個日期取值;缺的填 0
+    // 交集對齊:只收兩邊都有的日期(順序照使用者資料),缺日直接略過、不填 0
     const map = new Map();
     for (let i = 0; i < bDates.length; i++) map.set(bDates[i], bRet[i]);
-    const out = new Array(userLen).fill(0);
+    const out = [];
     let hit = 0;
     for (let i = 0; i < userDates.length && i < userLen; i++) {
       const v = map.get(userDates[i]);
-      if (v != null && isFinite(v)) { out[i] = v; hit++; }
+      if (v != null && isFinite(v)) { out.push(v); hit++; }
     }
-    if (hit >= userLen * 0.5) {
-      return { arr: out, noteKey: 'align_bydate', noteArgs: [hit, userLen] };
+    if (hit >= userLen * ALIGN_MIN_COVER && hit >= 2) {
+      return { arr: out, noteKey: 'align_bydate_intersect', noteArgs: [hit, userLen] };
     }
-    // 日期重疊太低 → 退化成長度對齊
-    warn('基準日期重疊過低,改用長度對齊');
+    // 交集覆蓋率不足 → 誠實 skip(舊版在此退化成長度對齊+補 0 = 稀釋基準,已移除)
+    warn('基準日期交集不足(', hit, '/', userLen, '),略過基準比較');
+    return { arr: null, noteKey: 'align_skip_overlap', noteArgs: [hit, userLen] };
   }
-  // 長度對齊:取基準尾端 userLen 期(較新的一段)
-  const tail = bRet.slice(Math.max(0, bRet.length - userLen));
-  const out = new Array(userLen).fill(0);
-  for (let i = 0; i < tail.length; i++) out[out.length - tail.length + i] = tail[i];
-  return {
-    arr: out,
-    noteKey: userDates ? 'align_len_nodate_overlap' : 'align_len_nodate',
-    noteArgs: [],
-  };
+
+  // 無日期可交集:長度對齊,但只在基準涵蓋足夠時,且絕不補 0
+  if (bRet.length >= userLen) {
+    // 基準夠長:取尾端等長一段(較新的一段),一對一、無填補
+    return {
+      arr: bRet.slice(bRet.length - userLen),
+      noteKey: userDates ? 'align_len_nodate_overlap' : 'align_len_nodate',
+      noteArgs: [],
+    };
+  }
+  if (bRet.length >= userLen * ALIGN_MIN_COVER && bRet.length >= 2) {
+    // 基準略短(≥80% 覆蓋):用基準全段對照(不足處不補 0——引擎會以基準自身長度算其指標)
+    return { arr: bRet.slice(), noteKey: 'align_len_partial', noteArgs: [bRet.length, userLen] };
+  }
+  // 基準太短 → 誠實 skip(舊版頭部補 0 灌長度,已移除)
+  warn('基準長度不足(', bRet.length, '/', userLen, '),略過基準比較');
+  return { arr: null, noteKey: 'align_skip_short', noteArgs: [bRet.length, userLen] };
 }
 
 // ============================================================================
@@ -1224,6 +1275,16 @@ async function runAnalysis() {
       benchmark_returns: benchArr,
       cost_bps_per_turnover: null,
       turnover: null,
+      // 偵測下沉(R12 MED):原始數值/原始日期字串 + JS 偵測 hint 一併送引擎,
+      // 由 Python detect_and_convert 重做權威偵測與轉換(民國年/淨值vs報酬),
+      // 與 hint 不一致時引擎以 warning 告知。JSON.stringify 會把 NaN 序列化為 null,引擎已處理。
+      raw: {
+        values: p.rawValues || null,
+        matrix: p.rawMatrix || null,
+        dates: p.datesRaw || null,
+        js_kind: p.jsKind || null,
+        js_kinds: p.jsKinds || null,
+      },
     };
     log('payload:', { mode: payload.mode, n_trials: nTrials, ppy, hasBench: !!benchArr,
                       len: userLen, benchNote });
@@ -1233,8 +1294,15 @@ async function runAnalysis() {
     const result = await State.pyodide.runPythonAsync(`
 import json
 from engine import analyze
-_p = json.loads(_payload_json)
+from engine.judge_web import detect_and_convert
+_p = detect_and_convert(json.loads(_payload_json))  # 權威偵測/轉換(無 raw 時原樣通過)
 _out = analyze(_p)
+# 偵測層 warnings(民國年/淨值偵測不一致等)併入分析 warnings,前端一併顯示
+_dw = list(_p.get("_detect_warnings") or [])
+_dwc = list(_p.get("_detect_warnings_coded") or [])
+if _dw and isinstance(_out, dict) and _out.get("ok"):
+    _out["warnings"] = _dw + list(_out.get("warnings") or [])
+    _out["warnings_coded"] = _dwc + list(_out.get("warnings_coded") or [])
 _out  # 回傳 dict,交給 JS 用 toJs 轉
 `);
     const out = result.toJs({ dict_converter: Object.fromEntries });
@@ -1353,7 +1421,15 @@ function plainThreePoints(out, benchCmp) {
   if (dsr && isNum(dsr.dsr_prob)) {
     const nt = isNum(dsr.n_trials) ? dsr.n_trials : 1;
     const prob = dsr.dsr_prob;
-    const trialClause = nt > 1 ? t('pt_dsr_trial_multi', nt) : t('pt_dsr_trial_single');
+    // 引擎回什麼就渲染什麼:單序列宣稱 n_trials>1 時,引擎以 SR 標準誤作試驗離散度
+    // 下限做保守通縮(sr_variance_proxy / reason params.var_proxy)→ 用 proxy 語意的 clause。
+    const varProxy = dsr.sr_var_proxy === true || dsr.sr_variance_proxy === true
+      || ((out.verdict && out.verdict.reasons_coded) || []).some(c =>
+           c && typeof c.code === 'string' && c.code.indexOf('dsr_') === 0
+           && c.params && c.params.var_proxy === true);
+    const trialClause = nt > 1
+      ? t(varProxy ? 'pt_dsr_trial_multi_proxy' : 'pt_dsr_trial_multi', nt)
+      : t('pt_dsr_trial_single');
     if (prob >= 0.95) {
       points.push({ icon: '🎯', text: t('pt_dsr_high', trialClause, fmtPct(prob, 0)) });
     } else if (prob >= 0.60) {
@@ -1590,10 +1666,15 @@ function renderGates(out) {
       else if (pv > 0.5) { bk = 'fail'; bt = t('b_loserand'); }
       else { bk = 'mid'; bt = t('b_nothresh'); }
     }
+    // 矩陣模式:此閘只檢「挑出的最佳欄」,對選擇偏誤失真 → 加註「以 FWER/PBO 為準」,
+    // 避免與 SPA「全軍覆沒」並列時自相矛盾(R12 LOW 修)。
+    const isMatrix = !!(out.pbo || (out.fwer && out.fwer.spa));
+    const permNote = t('g_perm_note', perm.n_perm || 0)
+      + (isMatrix ? `<br><em class="gate-caveat">${t('g_perm_matrix_caveat')}</em>` : '');
     cards.push(gateCard({
       title: t('g_perm_title'), sub: t('g_perm_sub'),
       badgeKind: bk, badgeTxt: bt,
-      note: t('g_perm_note', perm.n_perm || 0),
+      note: permNote,
       rows: [
         [t('g_perm_real'), fmt(perm.real_sharpe, 2), isNum(perm.real_sharpe) && perm.real_sharpe > 0 ? 'pos' : 'neg'],
         [t('g_perm_p95'), fmt(perm.null_p95_sharpe, 2)],

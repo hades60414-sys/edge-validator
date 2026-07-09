@@ -932,6 +932,8 @@ section { padding: 54px 0; }
 .badge.na   { color: var(--ink-3); border-color: var(--line-bright); }
 
 .gate p.gate-note { color: var(--ink-2); font-size: 13px; line-height: 1.5; margin: 0 0 14px; }
+/* 矩陣模式 permutation 卡的誠實加註(此閘對「挑最好那欄」選擇偏誤失真 → 以 FWER/PBO 為準) */
+.gate .gate-caveat { color: var(--incon); font-style: normal; font-size: 12.5px; }
 .gate .kv { display: flex; flex-direction: column; gap: 8px; }
 .gate .kv .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-family: var(--mono); font-size: 13px; }
 .gate .kv .row .kk { color: var(--ink-2); }

@@ -1,0 +1,39 @@
+name: engine tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    # 每週一 01:30 UTC:跑含 slow(對抗網格掃描)的完整套件
+    - cron: "30 1 * * 1"
+  workflow_dispatch:
+
+jobs:
+  # 快層:push/PR 都跑,排除 slow(對抗網格掃描 ~76s+ 的全掃測試)
+  fast:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install numpy pandas scipy pytest
+      - name: Run engine tests (fast layer)
+        run: pytest engine -m "not slow" -q
+
+  # 慢層:每週排程 + 手動觸發,跑完整套件(含對抗網格掃描)
+  full:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install numpy pandas scipy pytest
+      - name: Run engine tests (full, incl. slow adversarial grid scans)
+        run: pytest engine -q

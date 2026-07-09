@@ -524,5 +524,163 @@ def test_long_series_guard_reduces_resamples():
     assert not any(c["code"] == "long_series_guard" for c in out2["warnings_coded"])
 
 
+# ===========================================================================
+# 6. R12 必修回歸(E1):returns 模式 DSR 真通縮(SE proxy)/ 日曆跨度警語 /
+#    ppy_fallback / score_breakdown
+# ===========================================================================
+def test_returns_dsr_strictly_decreasing_in_n_trials():
+    """R12 HIGH 核心釘死:單序列 returns 模式,n_trials=1/150/10000 的 DSR 必須嚴格遞減。
+    舊 bug:單序列 trial pool=[自己] → variance=0 → sr0≡0 → 三者 DSR 完全相同(通縮空轉),
+    UI 卻宣稱「扣掉試 N 種參數的運氣」。"""
+    rng = np.random.default_rng(5)
+    r = (0.0006 + 0.01 * rng.standard_normal(400)).tolist()
+    outs = {nt: analyze({"mode": "returns", "returns": r, "n_trials": nt,
+                         "periods_per_year": 252}) for nt in (1, 150, 10000)}
+    d1, d150, d10000 = (outs[nt]["dsr"]["dsr_prob"] for nt in (1, 150, 10000))
+    assert d1 > d150 > d10000, (d1, d150, d10000)
+    # sr0(通縮門檻)隨 n_trials 嚴格上升
+    s1, s150, s10000 = (outs[nt]["dsr"]["sr0"] for nt in (1, 150, 10000))
+    assert s1 == 0.0 and 0.0 < s150 < s10000, (s1, s150, s10000)
+    # proxy 揭露:n_trials=1 不用 proxy(行為不變);>1 用 SE proxy 並照實標記
+    assert outs[1]["dsr"]["sr_var_proxy"] is False
+    assert outs[150]["dsr"]["sr_var_proxy"] is True
+    assert outs[10000]["dsr"]["sr_var_proxy"] is True
+
+
+def test_returns_dsr_proxy_matches_scipy_reference():
+    """proxy 路徑的 DSR 對照 scipy 參考實作(同公式、scipy 統計量)誤差 < 1e-6。"""
+    from scipy import stats
+    EULER = 0.5772156649015329
+    rng = np.random.default_rng(123)
+    max_err = 0.0
+    for n_trials in (2, 5, 150, 10000):
+        r = 0.0006 + 0.01 * rng.standard_normal(400)
+        mine = jw.deflated_sharpe(r, n_trials, np.array([jw._sharpe_periodic(r)]))
+        assert mine["sr_variance_proxy"] is True
+        rr = r[np.isfinite(r)]
+        std = rr.std(ddof=1)
+        sr = float(rr.mean() / std)
+        se2 = (1.0 + 0.5 * sr * sr) / rr.size          # SE(SR)² proxy
+        z1 = stats.norm.ppf(1 - 1.0 / n_trials)
+        z2 = stats.norm.ppf(1 - 1.0 / (n_trials * np.e))
+        sr0 = np.sqrt(se2) * ((1 - EULER) * z1 + EULER * z2)
+        denom = np.sqrt(1 - stats.skew(rr) * sr
+                        + (stats.kurtosis(rr, fisher=False) - 1) / 4.0 * sr ** 2)
+        ref = float(stats.norm.cdf((sr - sr0) * np.sqrt(rr.size - 1) / denom))
+        assert abs(float(mine["sr0_daily"]) - float(sr0)) < 1e-9
+        max_err = max(max_err, abs(float(mine["dsr"]) - ref))
+    assert max_err < 1e-6, f"proxy DSR 對照最大誤差 {max_err:.2e}"
+
+
+def test_returns_n_trials_1_behavior_unchanged():
+    """舊行為回歸:n_trials=1 不通縮(sr0=0)、無 proxy 標記、DSR reason 沿用舊文案
+    (params 不含 var_proxy)。"""
+    rng = np.random.default_rng(42)
+    n = 500
+    r = 0.0012 + 0.008 * rng.standard_normal(n)
+    out = analyze({"mode": "returns", "returns": r.tolist(), "n_trials": 1,
+                   "periods_per_year": 252})
+    assert out["dsr"]["sr0"] == 0.0
+    assert out["dsr"]["sr_var_proxy"] is False
+    for c in out["verdict"]["reasons_coded"]:
+        if c["code"].startswith("dsr_"):
+            assert "var_proxy" not in c["params"], c
+    # DSR 數值 = 未通縮 PSR(sr0=0),與舊版逐位相同的公式路徑
+    assert np.isfinite(out["dsr"]["dsr_prob"])
+
+
+def test_matrix_mode_dsr_uses_true_pool_not_proxy():
+    """matrix 模式本來就有真 trial pool(各欄 Sharpe)→ 不得走 proxy(回歸:matrix 不受影響)。"""
+    rng = np.random.default_rng(4)
+    n = 250
+    matrix = {f"p{i}": (0.0003 + 0.011 * rng.standard_normal(n)).tolist() for i in range(8)}
+    out = analyze({"mode": "matrix", "matrix": matrix, "n_trials": 8, "periods_per_year": 252})
+    assert out["dsr"]["sr_var_proxy"] is False
+    for c in out["verdict"]["reasons_coded"]:
+        if c["code"].startswith("dsr_"):
+            assert "var_proxy" not in c["params"], c
+
+
+def test_short_calendar_span_warning_intraday():
+    """R12 MED:2650 根 1 分 K(10 個交易日 ≈ 0.04 年)期數夠多但日曆時間極短 →
+    必須發 short_calendar_span 警語 + verdict reasons 提及;長跨度日頻資料不誤發。"""
+    dates = []
+    d = pd.Timestamp("2026-06-01")  # 週一
+    n_days = 0
+    while n_days < 10:
+        if d.dayofweek < 5:
+            base = d + pd.Timedelta(hours=9)
+            dates.extend((base + pd.Timedelta(minutes=m)).strftime("%Y-%m-%d %H:%M")
+                         for m in range(265))
+            n_days += 1
+        d += pd.Timedelta(days=1)
+    assert len(dates) == 2650
+    rng = np.random.default_rng(9)
+    r = (0.0001 * rng.standard_normal(2650)).tolist()
+    out = analyze({"mode": "returns", "returns": r, "dates": dates})
+    hits = [c for c in out["warnings_coded"] if c["code"] == "short_calendar_span"]
+    assert hits, out["warnings"]
+    assert 0.0 <= hits[0]["params"]["span_years"] < 0.5
+    assert any(c["code"] == "short_calendar_span" for c in out["verdict"]["reasons_coded"]), \
+        out["verdict"]["reasons"]
+    assert any("年化" in rr for rr in out["verdict"]["reasons"])
+    # 反向:~1.15 年日頻資料不得誤發
+    daily = pd.date_range("2024-01-01", periods=300, freq="B").astype(str).tolist()
+    r2 = (0.0005 + 0.01 * rng.standard_normal(300)).tolist()
+    out2 = analyze({"mode": "returns", "returns": r2, "dates": daily})
+    assert not any(c["code"] == "short_calendar_span" for c in out2["warnings_coded"])
+    assert not any(c["code"] == "short_calendar_span"
+                   for c in out2["verdict"]["reasons_coded"])
+
+
+def test_ppy_fallback_warning_on_bad_dates():
+    """R12 LOW:壞日期不再被裸 except 靜默吞掉——回退 252 必須帶 ppy_fallback 警語。"""
+    rng = np.random.default_rng(3)
+    r = (0.0005 + 0.01 * rng.standard_normal(50)).tolist()
+    out = analyze({"mode": "returns", "returns": r, "dates": ["not-a-date-xx"] * 50})
+    assert out["ok"] is True
+    hits = [c for c in out["warnings_coded"] if c["code"] == "ppy_fallback"]
+    assert hits, out["warnings"]
+    assert "error" in hits[0]["params"]
+    # 好日期不誤發
+    good = pd.date_range("2024-01-01", periods=50, freq="B").astype(str).tolist()
+    out2 = analyze({"mode": "returns", "returns": r, "dates": good})
+    assert not any(c["code"] == "ppy_fallback" for c in out2["warnings_coded"])
+
+
+def test_score_breakdown_sums_to_score():
+    """R12 LOW:verdict.score_breakdown 各閘加減分逐項揭露,clip(Σdelta,0,100)=score,
+    且每個非 base 項的 code 都能在 reasons_coded ∪ red_flags_coded 找到出處。"""
+    rng = np.random.default_rng(42)
+    n = 500
+    edge = 0.0012 + 0.008 * rng.standard_normal(n)
+    bench = 0.0001 + 0.008 * rng.standard_normal(n)
+    noise = 0.011 * np.random.default_rng(7).standard_normal(400)
+    mrng = np.random.default_rng(11)
+    noisy_matrix = {f"p{i}": (0.012 * mrng.standard_normal(260)).tolist() for i in range(20)}
+    payloads = [
+        {"mode": "returns", "returns": edge.tolist(), "benchmark_returns": bench.tolist(),
+         "n_trials": 1, "periods_per_year": 252},
+        {"mode": "returns", "returns": noise.tolist(), "n_trials": 200,
+         "periods_per_year": 252},
+        {"mode": "matrix", "matrix": noisy_matrix, "n_trials": 20, "periods_per_year": 252},
+        {"mode": "returns", "returns": noise[:40].tolist(), "n_trials": 5},  # 短樣本路徑
+    ]
+    for p in payloads:
+        out = analyze(p)
+        bd = out["verdict"]["score_breakdown"]
+        assert bd[0] == {"code": "base", "delta": 50.0}
+        total = sum(item["delta"] for item in bd)
+        assert round(float(np.clip(total, 0.0, 100.0)), 1) == out["verdict"]["score_0to100"], \
+            (bd, out["verdict"]["score_0to100"])
+        codes = ({c["code"] for c in out["verdict"]["reasons_coded"]}
+                 | {c["code"] for c in out["verdict"]["red_flags_coded"]})
+        for item in bd[1:]:
+            assert item["code"] in codes, (item, codes)
+    # 錯誤路徑也帶(空 list,契約一致)
+    bad = analyze({"mode": "returns", "returns": []})
+    assert bad["verdict"]["score_breakdown"] == []
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
