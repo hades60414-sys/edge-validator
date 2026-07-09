@@ -74,9 +74,15 @@
       </div>
 
       <div class="sample-row">
-        <span class="label">沒有資料?載入示範:</span>
-        <button class="btn small ghost" id="sampleGenuine" type="button">▸ 有真 edge 的樣本</button>
-        <button class="btn small ghost" id="sampleOverfit" type="button">▸ 過擬合的樣本</button>
+        <span class="label">沒有資料?先玩玩示範 —</span>
+        <button class="sample-btn genuine" id="sampleGenuine" type="button">
+          <span class="sb-ico" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/></svg></span>
+          <span class="sb-txt">有真 edge 的樣本<em>過得了關的長相</em></span>
+        </button>
+        <button class="sample-btn overfit" id="sampleOverfit" type="button">
+          <span class="sb-ico" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l16 12M20 6L4 18"/></svg></span>
+          <span class="sb-txt">過擬合的樣本<em>被照妖鏡抓包的長相</em></span>
+        </button>
       </div>
 
       <!-- ===================== 2. 參數 ===================== -->
@@ -132,6 +138,16 @@
       <div class="loader" id="loader">
         <div class="msg"><span class="dot warm"></span><span id="loaderMsg">正在載入裁判引擎(Pyodide + NumPy/Pandas,約 10–15MB)…</span></div>
         <div class="bar indeterminate" id="loaderBar"><span id="loaderFill"></span></div>
+        <div class="loader-steps" id="loaderSteps" aria-hidden="true">
+          <span class="lstep" data-step="0">啟動 Python</span>
+          <span class="lsep"></span>
+          <span class="lstep" data-step="1">載入 NumPy / Pandas</span>
+          <span class="lsep"></span>
+          <span class="lstep" data-step="2">注入引擎</span>
+          <span class="lsep"></span>
+          <span class="lstep" data-step="3">自我測試</span>
+        </div>
+        <p class="loader-foot">首次會多花幾秒下載數值套件,之後由瀏覽器快取,一切都在你本機跑。</p>
       </div>
 
       <!-- 錯誤條 -->
@@ -226,9 +242,10 @@
           <div id="equityChart"></div>
           <div class="legend" id="equityLegend"></div>
         </div>
-        <div class="chart-card">
-          <h4>隨機重排虛無分布</h4>
-          <p class="cap">把漂移抹掉、只保留波動,block-bootstrap 出的「靠運氣能刷到的年化夏普」。你的真實夏普要站在右邊才算贏過隨機。</p>
+        <div class="chart-card chart-card--null">
+          <h4>你 vs 純運氣</h4>
+          <p class="cap">把你的報酬順序隨機洗牌上千次(抹掉漂移、只留波動),看「靠運氣能刷到的年化夏普」長怎樣。你的真值站得越右、贏過越多隨機版本,越不像雜訊。</p>
+          <div class="null-banner" id="nullBanner" style="display:none"></div>
           <div id="nullChart"></div>
           <div class="legend" id="nullLegend"></div>
         </div>

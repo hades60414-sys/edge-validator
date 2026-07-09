@@ -63,30 +63,43 @@ async function ensureEngine() {
   }
   State.loading = true;
   const loader = $('loader');
-  const setMsg = (m) => { $('loaderMsg').textContent = m; log('loader:', m); };
+  // 步驟燈:done=已完成、active=進行中,讓等待有節奏、可預期
+  const setStep = (idx) => {
+    const steps = document.querySelectorAll('#loaderSteps .lstep');
+    steps.forEach((s, i) => {
+      s.classList.toggle('done', i < idx);
+      s.classList.toggle('active', i === idx);
+    });
+  };
+  const setMsg = (m, step) => {
+    $('loaderMsg').textContent = m;
+    if (isNum(step)) setStep(step);
+    log('loader:', m);
+  };
   loader.classList.add('show');
+  setStep(0);
   setEngineStatus('載入中…', 'warm');
 
   try {
     if (typeof loadPyodide !== 'function') {
       throw new Error('Pyodide 載入器不存在(CDN 未載入)。請確認網路可連 cdn.jsdelivr.net。');
     }
-    setMsg('正在啟動 Pyodide 執行環境…');
+    setMsg('正在啟動 Pyodide 執行環境…', 0);
     State.pyodide = await loadPyodide({
       indexURL: `https://cdn.jsdelivr.net/pyodide/${PYODIDE_VERSION}/full/`,
     });
     log('Pyodide 啟動完成');
 
-    setMsg('正在載入 NumPy / Pandas(數值套件,約 10MB)…');
+    setMsg('正在載入 NumPy / Pandas(數值套件,約 10MB)…', 1);
     await State.pyodide.loadPackage(['numpy', 'pandas']);
     log('numpy/pandas 載入完成');
 
-    setMsg('正在注入裁判引擎程式碼…');
+    setMsg('正在注入裁判引擎程式碼…', 2);
     await loadEngineSource(State.pyodide);
     log('engine 模組注入完成');
 
     // 冒煙測試:確認 analyze 可呼叫
-    setMsg('正在自我測試引擎…');
+    setMsg('正在自我測試引擎…', 3);
     const smoke = await State.pyodide.runPythonAsync(`
 import json
 from engine import analyze
@@ -96,6 +109,7 @@ json.dumps({"ok": _r["ok"], "verdict": _r["verdict"]["overall"]})
 `);
     log('引擎自測:', smoke);
 
+    setStep(4);  // 全部完成
     State.engineReady = true;
     setEngineStatus('引擎就緒', 'live');
     loader.classList.remove('show');
@@ -924,7 +938,11 @@ const SVGNS = 'http://www.w3.org/2000/svg';
 function drawEquityChart(equity, bench, parsed) {
   const host = $('equityChart');
   host.innerHTML = '';
-  if (!equity || equity.length < 2) { host.innerHTML = '<p class="cap">無足夠資料繪圖。</p>'; return; }
+  if (!equity || equity.length < 2) {
+    host.innerHTML = '<div class="chart-empty">資料太少,無法繪製資金曲線。<br><span>至少需要兩期報酬。</span></div>';
+    $('equityLegend').innerHTML = '';
+    return;
+  }
 
   const W = 640, H = 300, padL = 46, padR = 16, padT = 16, padB = 28;
   const iw = W - padL - padR, ih = H - padT - padB;
@@ -980,6 +998,16 @@ function drawEquityChart(equity, bench, parsed) {
   if (hasBench) svg.appendChild(mkPath(bench, X, Y, 'eq-bench'));
   // 策略線
   svg.appendChild(mkPath(equity, X, Y, 'eq-strat'));
+  // 策略末端發光點:視線落點,強調期末淨值
+  const ex = X(n - 1), ey = Y(equity[n - 1]);
+  const halo = document.createElementNS(SVGNS, 'circle');
+  halo.setAttribute('cx', ex); halo.setAttribute('cy', ey); halo.setAttribute('r', 6);
+  halo.setAttribute('class', 'eq-end-halo');
+  svg.appendChild(halo);
+  const dot = document.createElementNS(SVGNS, 'circle');
+  dot.setAttribute('cx', ex); dot.setAttribute('cy', ey); dot.setAttribute('r', 3);
+  dot.setAttribute('class', 'eq-end-dot');
+  svg.appendChild(dot);
 
   // x 軸端點標籤(首/末日期或期數)
   const lab0 = parsed && parsed.dates ? parsed.dates[0] : '第 1 期';
@@ -994,88 +1022,167 @@ function drawEquityChart(equity, bench, parsed) {
     (hasBench ? `<span><i style="background:var(--ink-2)"></i>對照基準(期末 ${fmt(bench[bench.length - 1], 2)}×)</span>` : '');
 }
 
-// 7b. permutation null 直方圖 + 真實 Sharpe 標線
+// 7b. permutation null 分布 + 真實 Sharpe 標線 —— 「你 vs 純運氣」的必殺視覺
+//     引擎只回 p95 / real / p_value(不回整條 null 陣列),但 p_value 已是「隨機版本裡
+//     贏過你的比例」的無偏估計 → 由它反推「你贏過 X% 的隨機版本」這個作品集金句。
+//     鐘形曲線是常態近似(以 0 為心、p95≈1.645σ 推 σ),純為示意形狀;真正的統計事實
+//     (你贏過幾成、p 值、是否過門檻)全部來自引擎回傳值,標線用真值。
 function drawNullChart(perm) {
   const host = $('nullChart');
   host.innerHTML = '';
   if (!perm || !isNum(perm.real_sharpe) || !isNum(perm.null_p95_sharpe)) {
-    host.innerHTML = '<p class="cap">樣本不足,未進行隨機重排檢定。</p>'; return;
+    host.innerHTML = '<div class="chart-empty">樣本太短,未進行隨機重排檢定。<br><span>需要至少約 8 期報酬。</span></div>';
+    $('nullLegend').innerHTML = '';
+    return;
   }
-  // 引擎沒回傳整個 null 分布,只有 p95 與 real。我們用「常態近似」重建一條示意分布:
-  // 以 0 為中心(H0 抹掉漂移→期望夏普≈0),p95 推 sigma(p95 ≈ 1.645σ)。純示意,標線用真值。
   const p95 = perm.null_p95_sharpe;
   const real = perm.real_sharpe;
+  const pv = isNum(perm.p_value) ? perm.p_value : null;
+  const passed = perm.passes;
+  const accent = passed ? 'var(--real)' : 'var(--overfit)';
+  const accentGlow = passed ? 'var(--real-glow)' : 'var(--overfit-glow)';
+  // 你贏過的隨機版本比例 = 1 - p_value(p 值 = 隨機裡 >= 你的比例)
+  const beatPct = pv != null ? Math.max(0, Math.min(100, (1 - pv) * 100)) : null;
+
   const sigma = Math.max(1e-6, Math.abs(p95) / 1.645);
   const mu = 0;
 
-  const W = 520, H = 300, padL = 20, padR = 16, padT = 20, padB = 34;
+  const W = 520, H = 268, padL = 14, padR = 14, padT = 40, padB = 40;
   const iw = W - padL - padR, ih = H - padT - padB;
+  const baseY = padT + ih;
 
-  // x 範圍:涵蓋 real 與分布尾巴
-  const lo = Math.min(mu - 3.2 * sigma, real - 0.4 * Math.abs(real) - 0.2);
-  const hi = Math.max(mu + 3.2 * sigma, real + 0.4 * Math.abs(real) + 0.2);
+  // x 範圍:涵蓋分布尾巴與真實 Sharpe,兩側各留一點呼吸
+  const lo = Math.min(mu - 3.3 * sigma, real - 0.35 * Math.abs(real) - 0.25);
+  const hi = Math.max(mu + 3.3 * sigma, real + 0.35 * Math.abs(real) + 0.25);
   const X = (v) => padL + ((v - lo) / (hi - lo)) * iw;
 
-  // 生成常態密度直方圖(30 bins)
-  const bins = 30;
-  const dens = [];
+  // 常態密度曲線取樣(平滑,非直方 bar)
+  const N = 120;
+  const pts = [];
   let dmax = 0;
-  for (let i = 0; i < bins; i++) {
-    const x = lo + ((i + 0.5) / bins) * (hi - lo);
+  for (let i = 0; i <= N; i++) {
+    const x = lo + (i / N) * (hi - lo);
     const y = Math.exp(-0.5 * ((x - mu) / sigma) ** 2);
-    dens.push({ x, y });
+    pts.push({ x, y });
     dmax = Math.max(dmax, y);
   }
-  const Y = (d) => padT + (1 - d / dmax) * ih;
+  const Y = (d) => padT + (1 - d / dmax) * (ih * 0.9);  // 頂端留白讓峰不頂天
 
   const svg = document.createElementNS(SVGNS, 'svg');
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   svg.setAttribute('role', 'img');
-  svg.setAttribute('aria-label', '隨機重排虛無分布直方圖');
+  svg.setAttribute('aria-label',
+    `隨機打亂虛無分布。你的真實年化夏普 ${fmt(real, 2)}` +
+    (beatPct != null ? `,勝過約 ${Math.round(beatPct)}% 的隨機版本` : '') + `。`);
+
+  const xr = X(real);
+  const clampXr = Math.max(padL + 1, Math.min(W - padR - 1, xr));
+
+  svg.innerHTML = `<defs>
+    <linearGradient id="nullFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="var(--scan)" stop-opacity="0.20"/>
+      <stop offset="100%" stop-color="var(--scan)" stop-opacity="0.015"/>
+    </linearGradient>
+    <linearGradient id="nullBeat" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${passed ? 'var(--real)' : 'var(--overfit)'}" stop-opacity="0.24"/>
+      <stop offset="100%" stop-color="${passed ? 'var(--real)' : 'var(--overfit)'}" stop-opacity="0.02"/>
+    </linearGradient>
+    <clipPath id="beatClip"><rect x="${padL}" y="${padT - 20}" width="${Math.max(0, clampXr - padL)}" height="${ih + 24}"/></clipPath>
+  </defs>`;
+
+  // 主分布面積(你「沒」贏的隨機世界:曲線下全域,淡青綠)
+  let d = `M ${X(lo)} ${baseY}`;
+  pts.forEach(p => { d += ` L ${X(p.x)} ${Y(p.y)}`; });
+  d += ` L ${X(hi)} ${baseY} Z`;
+  const area = document.createElementNS(SVGNS, 'path');
+  area.setAttribute('d', d);
+  area.setAttribute('fill', 'url(#nullFill)');
+  svg.appendChild(area);
+
+  // 「你贏過的」區塊:同一面積但裁到 real 左側,填判決色 → 一眼看見你吃掉了多少隨機世界
+  const beatArea = document.createElementNS(SVGNS, 'path');
+  beatArea.setAttribute('d', d);
+  beatArea.setAttribute('fill', 'url(#nullBeat)');
+  beatArea.setAttribute('clip-path', 'url(#beatClip)');
+  svg.appendChild(beatArea);
+
+  // 分布輪廓線
+  let ld = `M ${X(pts[0].x)} ${Y(pts[0].y)}`;
+  pts.forEach((p, i) => { if (i) ld += ` L ${X(p.x)} ${Y(p.y)}`; });
+  const line = document.createElementNS(SVGNS, 'path');
+  line.setAttribute('d', ld);
+  line.setAttribute('class', 'null-curve');
+  svg.appendChild(line);
 
   // 底軸
-  svg.appendChild(mkLine(padL, padT + ih, W - padR, padT + ih, 'axis-line'));
+  svg.appendChild(mkLine(padL, baseY, W - padR, baseY, 'axis-line'));
 
-  // 直方圖 bar
-  const bw = iw / bins;
-  dens.forEach((d, i) => {
-    const bx = padL + i * bw;
-    const by = Y(d.y);
-    const rect = document.createElementNS(SVGNS, 'rect');
-    rect.setAttribute('x', bx + 0.5); rect.setAttribute('y', by);
-    rect.setAttribute('width', Math.max(0.5, bw - 1)); rect.setAttribute('height', padT + ih - by);
-    rect.setAttribute('class', 'hist-bar');
-    svg.appendChild(rect);
-  });
+  // 0 參考刻度(隨機世界的期望夏普)
+  const x0 = X(0);
+  if (x0 > padL + 6 && x0 < W - padR - 6) {
+    svg.appendChild(mkLine(x0, baseY, x0, baseY + 5, 'axis-line'));
+    svg.appendChild(mkText(x0, baseY + 17, '0', 'axis-text', 'middle'));
+  }
 
-  // p95 門檻線(琥珀虛線)
+  // p95 門檻線(過關線,琥珀虛線)
   const xp95 = X(p95);
-  svg.appendChild(mkLine(xp95, padT, xp95, padT + ih, 'hist-p95'));
-  svg.appendChild(mkText(xp95, padT - 6, `隨機 p95 = ${fmt(p95, 2)}`, 'axis-text', 'middle'));
+  if (xp95 > padL && xp95 < W - padR) {
+    svg.appendChild(mkLine(xp95, Y(dmax * 0.02), xp95, baseY, 'hist-p95'));
+    svg.appendChild(mkText(xp95, baseY + 17, `過關線 ${fmt(p95, 1)}`, 'axis-text hist-p95-txt', 'middle'));
+  }
 
-  // real Sharpe 標線(判決色)
-  const passed = perm.passes;
-  const xr = X(real);
-  const realLine = mkLine(xr, padT - 2, xr, padT + ih, 'hist-real');
-  realLine.style.stroke = passed ? 'var(--real)' : 'var(--overfit)';
+  // real Sharpe 標線 + 頂端旗標(判決色,發光)
+  const realLine = mkLine(clampXr, padT - 22, clampXr, baseY, 'hist-real');
+  realLine.style.stroke = accent;
   svg.appendChild(realLine);
-  // 三角標
+  // 旗標膠囊:「你 · Sharpe X.XX」
+  const flagTxt = `你 · ${fmt(real, 2)}`;
+  const flagW = Math.max(58, flagTxt.length * 8.4 + 16);
+  const onRight = clampXr > W - padR - flagW / 2 - 4;
+  const flagX = onRight ? clampXr - flagW - 2 : (clampXr < padL + flagW / 2 + 4 ? clampXr + 2 : clampXr - flagW / 2);
+  const flagG = document.createElementNS(SVGNS, 'g');
+  const flagRect = document.createElementNS(SVGNS, 'rect');
+  flagRect.setAttribute('x', flagX); flagRect.setAttribute('y', padT - 34);
+  flagRect.setAttribute('width', flagW); flagRect.setAttribute('height', 20);
+  flagRect.setAttribute('rx', 2);
+  flagRect.setAttribute('fill', accent);
+  flagG.appendChild(flagRect);
+  const flagLabel = mkText(flagX + flagW / 2, padT - 20, flagTxt, 'null-flag-txt', 'middle');
+  flagG.appendChild(flagLabel);
+  svg.appendChild(flagG);
+  // 旗標小尖角指向標線
   const tri = document.createElementNS(SVGNS, 'path');
-  tri.setAttribute('d', `M ${xr - 5} ${padT - 2} L ${xr + 5} ${padT - 2} L ${xr} ${padT + 6} Z`);
-  tri.setAttribute('fill', passed ? 'var(--real)' : 'var(--overfit)');
+  tri.setAttribute('d', `M ${clampXr - 4} ${padT - 14} L ${clampXr + 4} ${padT - 14} L ${clampXr} ${padT - 9} Z`);
+  tri.setAttribute('fill', accent);
   svg.appendChild(tri);
 
-  // x 軸標籤
-  svg.appendChild(mkText(padL, H - 14, fmt(lo, 1), 'axis-text', 'start'));
-  svg.appendChild(mkText(W - padR, H - 14, fmt(hi, 1), 'axis-text', 'end'));
-  svg.appendChild(mkText((padL + W - padR) / 2, H - 14, '年化夏普(隨機打亂的世界)', 'axis-text', 'middle'));
+  // x 軸說明
+  svg.appendChild(mkText((padL + W - padR) / 2, H - 6,
+    '年化夏普 —— 把你的報酬順序隨機洗牌上千次能刷到的分布', 'axis-text axis-caption', 'middle'));
 
   host.appendChild(svg);
 
+  // ---- 金句橫幅:你贏過 X% 的隨機版本(作品集必殺一行)----
+  const banner = $('nullBanner');
+  if (banner) {
+    if (beatPct != null) {
+      const pctTxt = beatPct >= 99.5 ? '>99' : (beatPct <= 0.5 ? '<1' : String(Math.round(beatPct)));
+      const verb = passed ? '穩穩勝過' : (beatPct >= 50 ? '勝過' : '只贏過');
+      banner.className = 'null-banner ' + (passed ? 'good' : (beatPct >= 50 ? 'mid' : 'bad'));
+      banner.innerHTML =
+        `<span class="nb-lead">你${verb}</span>` +
+        `<span class="nb-num">${pctTxt}<small>%</small></span>` +
+        `<span class="nb-tail">的隨機打亂版本 <em>· p=${fmt(pv, 3)}</em></span>`;
+      banner.style.display = 'flex';
+    } else {
+      banner.style.display = 'none';
+    }
+  }
+
   $('nullLegend').innerHTML =
-    `<span><i style="background:var(--scan-dim)"></i>隨機分布(示意)</span>` +
-    `<span><i style="background:var(--incon)"></i>隨機 95 百分位</span>` +
-    `<span><i style="background:${passed ? 'var(--real)' : 'var(--overfit)'}"></i>你的真實夏普 ${fmt(real, 2)}(p=${fmt(perm.p_value, 3)})</span>`;
+    `<span><i style="background:var(--scan-dim);opacity:.6"></i>隨機打亂的成績分布(示意形狀)</span>` +
+    `<span><i style="background:var(--incon)"></i>95% 過關門檻</span>` +
+    `<span><i style="background:${passed ? 'var(--real)' : 'var(--overfit)'}"></i>你的真實夏普 ${fmt(real, 2)}</span>`;
 }
 
 // SVG 小工具
