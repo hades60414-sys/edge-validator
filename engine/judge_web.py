@@ -123,6 +123,64 @@ def deflated_sharpe(returns: np.ndarray, n_trials: int,
             "n_trials": int(n_trials)}
 
 
+# ---------------------------------------------------------------------------
+# 2.5 matrix n_trials 硬化(★防雜訊放水核心,單一真源★)
+#     農場 NOISE_POOL 精神:多重檢定的分母必須反映【真實搜尋廣度】。「N 欄挑最佳」時,
+#     達不到真實信心地板(DSR≥0.95)的最佳欄,與「一次幸運的雜訊抽樣」不可區分——此時把
+#     n_trials 沿倍率放大到裁判自己的 DSR 跌破雜訊地板(0.60),使它【不會】被判 likely-real。
+#     真 edge 一開始就站上 0.95,維持誠實 n_trials=N(=欄數),不被多罰。
+#
+#     這段【本】在 local/sources.py(本地版),R4 搬進 engine 成單一真源:公開站(app.js
+#     只要照送 mode=matrix)與本地版共用同一硬化,不分叉。engine 內部直接呼 deflated_sharpe
+#     算 DSR(與 analyze 回的 dsr_prob 逐位元相同,已驗),故無遞迴、確定性、Pyodide-safe。
+# ---------------------------------------------------------------------------
+REAL_CONF_BAR = 0.95   # 農場真實信心地板:DSR≥此值才算「有 edge 的機率夠高」(維持誠實 n_trials)
+NOISE_FLOOR = 0.60     # 裁判雜訊地板:未達真實信心的最佳欄,硬化到 DSR 跌破此值使其不判為真
+HARDEN_MULTS = (2, 4, 8, 16, 32)  # n_trials 放大梯度
+
+
+def harden_matrix_n_trials(returns: np.ndarray, trial_sharpes: np.ndarray,
+                           base_n_trials: int) -> tuple[int, dict]:
+    """決定「N 欄挑最佳」該用多大的 n_trials 送 DSR 通縮。純函數,只讀。
+
+    returns       : matrix 挑出的主序列(樣本內夏普最高欄)。
+    trial_sharpes : 各欄每期夏普池(DSR 通縮的真試驗池)。
+    base_n_trials : 誠實基準 = 欄數 N。
+
+    做法(誠實、無魔術常數,兩門檻取自裁判/農場既有語意):
+      pass1:用誠實 n_trials=N 算 DSR。DSR ≥ 0.95 → 真達標,回 (N, 診斷),不多罰。
+      DSR < 0.95 → 沿 HARDEN_MULTS 逐級放大 n_trials,回報「首次讓 DSR < 0.60」那級(或封頂級)。
+                   高 n_trials 正是「這個贏家在如此廣的搜尋下毫不出奇」的誠實表述,非灌水。
+
+    回 (effective_n_trials, diag)。diag 帶 dsr_at_base / dsr_final / bar / hardened,供揭露。
+    """
+    base = max(int(base_n_trials), 2)
+    diag = {"bar": REAL_CONF_BAR, "noise_floor": NOISE_FLOOR, "base_n_trials": base,
+            "dsr_at_base": None, "dsr_final": None, "hardened": False}
+
+    def _dsr(nt: int) -> float:
+        return float(deflated_sharpe(returns, nt, trial_sharpes)["dsr"])
+
+    d0 = _dsr(base)
+    diag["dsr_at_base"] = d0
+    diag["dsr_final"] = d0
+    # DSR 算不出(樣本/變異不足)→ 不硬掛,回誠實 base(讓裁判用既有邏輯處理)
+    if not (d0 == d0):  # NaN check(無 numpy 依賴)
+        return base, diag
+    if d0 >= REAL_CONF_BAR:
+        return base, diag  # 真達標:維持誠實 n_trials,不多罰
+
+    eff = base
+    for mult in HARDEN_MULTS:
+        eff = base * mult
+        d = _dsr(eff)
+        diag["dsr_final"] = d
+        diag["hardened"] = True
+        if d == d and d < NOISE_FLOOR:
+            return eff, diag
+    return eff, diag  # 封頂仍未跌破:回最大級(已盡量通縮)
+
+
 # ===========================================================================
 # 3. FWER 層:circular block bootstrap 底座 + SPA + Romano-Wolf + PBO
 #    (移植 farm/fwer_gates.py,本就純 numpy)
@@ -524,7 +582,12 @@ def analyze(payload: dict) -> dict:
         best_k = int(np.nanargmax(col_sr)) if col_sr.size else 0
         returns = mat[:, best_k]
         trial_sharpes = col_sr
-        n_trials = max(n_trials, len(names))
+        # ★防雜訊放水:誠實基準 = max(使用者宣稱 n_trials, 欄數),再由 harden 決定有效 n_trials★
+        #   達真實信心地板(DSR≥0.95)的真 edge 維持誠實 n_trials;未達地板的最佳欄(與一次
+        #   幸運雜訊抽樣不可區分)則上調 n_trials 到 DSR 跌破雜訊地板(0.60),不判為 likely-real。
+        #   engine 內建此硬化 → 公開站(app.js 送 mode=matrix)與本地版共用同一判準,不分叉。
+        honest_base = max(int(n_trials), len(names))
+        n_trials, harden_diag = harden_matrix_n_trials(returns, trial_sharpes, honest_base)
     else:
         returns = np.nan_to_num(np.asarray(payload.get("returns") or [], dtype=float), nan=0.0)
         if returns.size == 0:
@@ -533,6 +596,7 @@ def analyze(payload: dict) -> dict:
                     "score_0to100": 0, "reasons": ["無資料"], "red_flags": []}}
         names, mat = None, None
         trial_sharpes = np.array([_sharpe_periodic(returns)])
+        harden_diag = None  # returns 模式不硬化(硬化只在 matrix)
 
     n = returns.size
     if n < 30:
@@ -545,7 +609,8 @@ def analyze(payload: dict) -> dict:
     dsr_res = deflated_sharpe(returns, n_trials, trial_sharpes)
     sr_annual = metrics["sharpe"]
     dsr = {"sr_annual": sr_annual, "sr0": float(dsr_res["sr0_daily"] * np.sqrt(ppy)),
-           "dsr_prob": dsr_res["dsr"], "p_value": dsr_res["p_value"], "n_trials": n_trials}
+           "dsr_prob": dsr_res["dsr"], "p_value": dsr_res["p_value"], "n_trials": n_trials,
+           "harden": harden_diag}  # matrix 硬化診斷(returns 模式為 None)
 
     # ---- permutation null ----
     perm = permutation_null(returns, ppy)

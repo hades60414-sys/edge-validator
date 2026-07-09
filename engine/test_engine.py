@@ -186,6 +186,67 @@ def test_power_overfit_matrix():
 
 
 # ===========================================================================
+# 4.5 matrix n_trials 硬化(★engine 內建防雜訊放水,R4 搬入的單一真源★)
+# ===========================================================================
+def test_engine_matrix_hardening_kills_public_path_noise():
+    """公開站 app.js 送的 matrix payload(n_trials=1 UI 預設)——engine 自己硬化,
+    20 欄純高斯雜訊【不得】被判 likely-real。這是公開站放水的直接回歸鎖。"""
+    leaks = 0
+    for s in range(60):
+        rng = np.random.default_rng(s)
+        n = 260
+        matrix = {f"策略{i+1}": (0.012 * rng.standard_normal(n)).tolist() for i in range(20)}
+        # 模擬公開 app.js matrix 上傳:mode=matrix、n_trials 用 UI 預設 1、無日期
+        out = analyze({"mode": "matrix", "dates": None, "returns": None, "matrix": matrix,
+                       "n_trials": 1, "periods_per_year": None, "benchmark_returns": None,
+                       "cost_bps_per_turnover": None, "turnover": None})
+        if out["verdict"]["overall"] == "likely-real":
+            leaks += 1
+    assert leaks == 0, f"公開站路徑 20 欄雜訊放水 {leaks}/60 判 likely-real(硬化失效)"
+
+
+def test_engine_hardening_reports_diag_and_escalates():
+    """硬化診斷齊全:雜訊矩陣 → hardened=True 且用的 n_trials 高於誠實 base(欄數)。"""
+    rng = np.random.default_rng(20260709)
+    n = 260
+    matrix = {f"c{i}": (0.012 * rng.standard_normal(n)).tolist() for i in range(20)}
+    out = analyze({"mode": "matrix", "matrix": matrix, "n_trials": 1})
+    hd = out["dsr"]["harden"]
+    assert hd is not None
+    assert set(hd) >= {"bar", "noise_floor", "base_n_trials", "dsr_at_base",
+                       "dsr_final", "hardened"}
+    assert hd["base_n_trials"] == 20               # 誠實基準=欄數
+    assert hd["hardened"] is True                  # 雜訊被通縮上調
+    assert out["dsr"]["n_trials"] > 20             # 有效 n_trials 高於誠實 base
+    assert hd["dsr_final"] <= hd["dsr_at_base"] + 1e-9  # 通縮方向正確(DSR 不反升)
+
+
+def test_engine_hardening_keeps_true_edge_honest():
+    """真 edge 矩陣(DSR≥0.95):維持誠實 n_trials=欄數、hardened=False、仍 likely-real。"""
+    rng = np.random.default_rng(1000)
+    n = 500
+    matrix = {f"p{i}": (0.0012 + 0.008 * rng.standard_normal(n)).tolist() for i in range(20)}
+    bench = (0.0001 + 0.008 * rng.standard_normal(n)).tolist()
+    out = analyze({"mode": "matrix", "matrix": matrix, "n_trials": 1,
+                   "benchmark_returns": bench, "periods_per_year": 252})
+    hd = out["dsr"]["harden"]
+    assert hd["hardened"] is False                 # 真 edge 不被多罰
+    assert out["dsr"]["n_trials"] == 20            # 維持誠實 n_trials
+    assert out["dsr"]["dsr_prob"] >= 0.95
+    assert out["verdict"]["overall"] == "likely-real"
+
+
+def test_engine_returns_mode_unaffected_by_hardening():
+    """單序列(mode=returns)路徑【完全不受硬化影響】:harden 診斷為 None、n_trials 原樣。"""
+    rng = np.random.default_rng(1)
+    r = 0.0006 + 0.01 * rng.standard_normal(400)
+    out = analyze({"mode": "returns", "returns": r.tolist(),
+                   "n_trials": 5, "periods_per_year": 252})
+    assert out["dsr"]["harden"] is None            # returns 模式不硬化
+    assert out["dsr"]["n_trials"] == 5             # n_trials 原樣不被上調
+
+
+# ===========================================================================
 # 5. DSR 對照 farm judge.py 的 scipy 版(誤差 < 1e-6)
 # ===========================================================================
 def test_dsr_matches_scipy_reference():

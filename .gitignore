@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .claude/
 .DS_Store
+
+# 本地版產物:不該進公開 repo(個人判決史 + 使用者投放的私有回測 CSV)
+local/snapshots.jsonl
+watch/*.csv
