@@ -21,6 +21,12 @@ from . import statshim as ss
 EULER_GAMMA = 0.5772156649015329
 _SE_FLOOR = 1e-12
 
+# ★R17 必修1:缺值 fail-closed 門檻★
+#   空白/非數值格以 0 填補會人為壓低波動、抬高夏普(把最差的日子留空即可騙分)。
+#   本引擎【絕不填 0】:缺格率 < 門檻 → 整期剔除並告警揭露;≥ 門檻 → 結構化拒審。
+#   與前端 parseCSV 同判準,雙層防禦(引擎也被本地 Streamlit 版直呼)。
+MISSING_MAX_RATE = 0.05
+
 
 # ===========================================================================
 # 1. 績效指標(移植 backtest/metrics.py,改吃 periods_per_year 純數字)
@@ -521,6 +527,12 @@ def _verdict(signals: dict) -> dict:
     excess_cagr = signals.get("excess_cagr")
     conc = signals.get("concentration")
     n_trials = signals.get("n_trials", 1)
+    # R17 必修2:申報 vs 採用分開帶。n_trials=引擎實際用於通縮的試驗數(matrix 模式可能
+    # 被欄數地板/雜訊硬化保守上調);n_trials_declared=使用者申報值。措辭據此誠實分流,
+    # 不再把硬化後的數字冒充成「你試了 N 種」。
+    n_trials_declared = signals.get("n_trials_declared")
+    trials_uplifted = (n_trials_declared is not None
+                       and int(n_trials_declared) < int(n_trials or 1))
     n_periods = signals.get("n_periods", 0)
     real_sharpe = signals.get("real_sharpe")
     capped_escape = signals.get("capped_escape", False)
@@ -665,14 +677,29 @@ def _verdict(signals: dict) -> dict:
             _bump("concentration_ok", 4.0)
 
     # --- n_trials 懲罰 ---
+    # R17 必修2:硬化/欄數地板上調時,不再說「你試了 N 種」(那是引擎的保守通縮數,
+    # 不是使用者的申報)——改講「通縮以 N 種計(你申報 M 種,保守上調)」,與 DSR 卡
+    # 「申報 M → 保守上調 N」的揭露一致,不自相矛盾。申報=採用時措辭維持自然。
     if n_trials and n_trials > 20:
         pen = min(15.0, 3.0 * np.log10(n_trials))
-        _reason(f"你試了 {n_trials} 種參數:試越多,靠運氣撞到漂亮結果的機率越高,已按此扣分。",
-                "many_trials_penalty", n_trials=int(n_trials))
+        if trials_uplifted:
+            _reason(f"通縮以 {n_trials} 種試驗計(你申報 {int(n_trials_declared)} 種,"
+                    "引擎依欄數地板/雜訊硬化保守上調):搜尋越廣,靠運氣撞到漂亮結果的機率越高,已按此扣分。",
+                    "many_trials_penalty", n_trials=int(n_trials),
+                    declared=int(n_trials_declared))
+        else:
+            _reason(f"你試了 {n_trials} 種參數:試越多,靠運氣撞到漂亮結果的機率越高,已按此扣分。",
+                    "many_trials_penalty", n_trials=int(n_trials))
         _bump("many_trials_penalty", -float(pen))
     elif n_trials and n_trials > 1:
-        _reason(f"你試了 {n_trials} 種參數:已納入多重檢定校正(DSR)。",
-                "trials_corrected", n_trials=int(n_trials))
+        if trials_uplifted:
+            _reason(f"通縮以 {n_trials} 種試驗計(你申報 {int(n_trials_declared)} 種,"
+                    "引擎依欄數地板/雜訊硬化保守上調),已納入多重檢定校正(DSR)。",
+                    "trials_corrected", n_trials=int(n_trials),
+                    declared=int(n_trials_declared))
+        else:
+            _reason(f"你試了 {n_trials} 種參數:已納入多重檢定校正(DSR)。",
+                    "trials_corrected", n_trials=int(n_trials))
 
     # --- 樣本量提醒 ---
     if n_periods and n_periods < 60:
@@ -753,6 +780,16 @@ def _infer_ppy(dates, fallback, warn=None):
     return 252.0
 
 
+def _missing_reject(zh: str, code: str, **params) -> dict:
+    """R17 必修1:缺值 fail-closed 的【結構化拒審】結果(照 matrix_empty 慣例:
+    可渲染、不裸丟例外)。前端以 warnings_coded 的 code 渲染對應語言錯誤卡。"""
+    coded = [{"code": code, "params": params}]
+    return {"ok": False, "warnings": [zh], "warnings_coded": coded,
+            "metrics": {}, "verdict": {"overall": "inconclusive",
+            "score_0to100": 0, "reasons": [zh], "red_flags": [],
+            "reasons_coded": coded, "red_flags_coded": [], "score_breakdown": []}}
+
+
 def analyze(payload: dict) -> dict:
     """統一裁判入口。契約見模組 docstring / README。純函數。
 
@@ -768,10 +805,13 @@ def analyze(payload: dict) -> dict:
     mode = payload.get("mode", "returns")
     dates = payload.get("dates")
     n_trials = int(payload.get("n_trials") or 1)
+    n_trials_declared = n_trials  # R17 必修2:使用者申報值,供判決措辭誠實分流
     ppy = _infer_ppy(dates, payload.get("periods_per_year"), warn=_warn)
     bench_ret = payload.get("benchmark_returns")
+    bench_idx = payload.get("benchmark_idx")  # R17 必修4:交集日在使用者序列中的索引
     cost_bps = payload.get("cost_bps_per_turnover")
     turnover = payload.get("turnover")
+    keep_mask = None  # R17 必修1:缺值剔除遮罩(原座標),供基準配對索引重映射
 
     # ---- 取主報酬序列 ----
     if mode == "matrix":
@@ -788,7 +828,42 @@ def analyze(payload: dict) -> dict:
         T = min(len(c) for c in cols)
         cols = [c[:T] for c in cols]
         mat = np.column_stack(cols)
-        mat = np.nan_to_num(mat, nan=0.0)
+        # ★R17 必修1:缺值 fail-closed(矩陣)——絕不以 0 填補★
+        #   任一欄非有限值率 ≥5% → 結構化拒審(帶欄名);<5% → 含缺格的列【整列剔除】
+        #   (保持各欄橫斷面對齊)並告警;剔除列合計 ≥5% 也拒審(多欄缺格互不重疊會
+        #   複利吃樣本,同樣不允許靜默)。dates 同步剔除。
+        finite = np.isfinite(mat)
+        if not bool(finite.all()):
+            col_bad = (~finite).sum(axis=0)
+            worst = int(np.argmax(col_bad))
+            worst_rate = float(col_bad[worst]) / float(T)
+            if worst_rate >= MISSING_MAX_RATE:
+                return _missing_reject(
+                    f"缺值拒審:欄「{names[worst]}」有 {int(col_bad[worst])}/{T} 期"
+                    f"({worst_rate * 100:.0f}%)為空白或非數值(NaN)。以 0 填補會人為壓低"
+                    "波動、抬高夏普、扭曲判決——本引擎絕不填 0;任一欄缺格率 ≥5% 時誠實拒審。"
+                    "請補齊資料或移除該欄後再試。",
+                    "missing_values_reject", col=str(names[worst]),
+                    n_missing=int(col_bad[worst]), n_periods=int(T),
+                    rate=round(worst_rate, 4), threshold=MISSING_MAX_RATE)
+            row_keep = finite.all(axis=1)
+            n_drop = int((~row_keep).sum())
+            drop_rate = n_drop / float(T)
+            if drop_rate >= MISSING_MAX_RATE:
+                return _missing_reject(
+                    f"缺值拒審:各欄缺格雖皆 <5%,但含缺格的列合計 {n_drop}/{T}"
+                    f"({drop_rate * 100:.0f}%)——整列剔除以保持橫斷面對齊後樣本失真過大,"
+                    "本引擎誠實拒審(絕不以 0 填補)。請補齊資料後再試。",
+                    "missing_rows_reject", n_rows_dropped=n_drop, n_periods=int(T),
+                    rate=round(drop_rate, 4), threshold=MISSING_MAX_RATE)
+            keep_mask = row_keep
+            mat = mat[row_keep]
+            T = int(mat.shape[0])
+            if dates is not None and len(dates) == row_keep.size:
+                dates = [d for d, k in zip(dates, row_keep) if k]
+            _warn(f"缺值處理:{n_drop} 列含空白/非數值,已【整列剔除】以保持各欄橫斷面對齊"
+                  f"(絕不以 0 填補,填 0 會人為壓低波動),有效樣本 {T} 期。",
+                  "missing_rows_dropped", n_rows_dropped=n_drop, n_kept=int(T))
         # 主序列 = matrix 內每期 Sharpe 最高者(使用者最可能上手的贏家)
         col_sr = np.array([_sharpe_periodic(mat[:, k]) for k in range(mat.shape[1])])
         best_k = int(np.nanargmax(col_sr)) if col_sr.size else 0
@@ -812,7 +887,7 @@ def analyze(payload: dict) -> dict:
                 "檢定力薄弱,務必以更長樣本或前向(walk-forward)測試複核,別直接當真。",
                 "high_dim_low_power", n_cols=int(len(names)), n_periods=int(T))
     else:
-        returns = np.nan_to_num(np.asarray(payload.get("returns") or [], dtype=float), nan=0.0)
+        returns = np.asarray(payload.get("returns") or [], dtype=float)
         if returns.size == 0:
             return {"ok": False, "warnings": ["returns 模式但 returns 為空"],
                     "warnings_coded": [{"code": "returns_empty", "params": {}}],
@@ -820,6 +895,28 @@ def analyze(payload: dict) -> dict:
                     "score_0to100": 0, "reasons": ["無資料"], "red_flags": [],
                     "reasons_coded": [{"code": "no_data", "params": {}}],
                     "red_flags_coded": [], "score_breakdown": []}}
+        # ★R17 必修1:缺值 fail-closed(單序列)——絕不以 0 填補★
+        #   舊版 nan_to_num(nan=0.0) 會讓「最差 100 天留空」的騙局被填 0 洗白;
+        #   修後:缺格率 ≥5% → 結構化拒審;<5% → 整期剔除+告警;dates 同步剔除。
+        finite_mask = np.isfinite(returns)
+        n_bad = int((~finite_mask).sum())
+        if n_bad:
+            rate = n_bad / float(returns.size)
+            if rate >= MISSING_MAX_RATE:
+                return _missing_reject(
+                    f"缺值拒審:報酬序列有 {n_bad}/{returns.size} 期({rate * 100:.0f}%)"
+                    "為空白或非數值(NaN)。以 0 填補會人為壓低波動、抬高夏普、扭曲判決——"
+                    "本引擎絕不填 0;缺格率 ≥5% 時誠實拒審。請補齊資料或移除缺值過多的期間後再試。",
+                    "missing_values_reject", n_missing=n_bad, n_periods=int(returns.size),
+                    rate=round(float(rate), 4), threshold=MISSING_MAX_RATE)
+            keep_mask = finite_mask
+            returns = returns[finite_mask]
+            if dates is not None and len(dates) == finite_mask.size:
+                dates = [d for d, k in zip(dates, finite_mask) if k]
+            _warn(f"缺值處理:{n_bad} 期空白/非數值已【整期剔除】(絕不以 0 填補,"
+                  f"填 0 會人為壓低波動、抬高夏普),有效樣本 {returns.size} 期,"
+                  "統計檢定在剔除後的序列上執行。",
+                  "missing_values_dropped", n_missing=n_bad, n_kept=int(returns.size))
         names, mat = None, None
         trial_sharpes = np.array([_sharpe_periodic(returns)])
         harden_diag = None  # returns 模式不硬化(硬化只在 matrix)
@@ -888,10 +985,29 @@ def analyze(payload: dict) -> dict:
         fwer_bench_cov = None
         if bench_ret is not None:
             b_arr = np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)
-            if b_arr.size >= T_mat:
+            # ★R17 收尾(驗收官刀):引擎剔除過缺值列時,基準必須以同一 keep_mask 同步剔除,
+            #   否則 b_arr[:T_mat] 位置截斷會逐期錯位、卻仍宣稱 aligned/coverage=1.0(假揭露)。
+            #   基準長度=原始列數 → 同步剔除;對不上原始列數 → 無法確定配對,誠實降級零基準。
+            bench_pairable = True
+            if keep_mask is not None:
+                if b_arr.size == keep_mask.size:
+                    b_arr = b_arr[keep_mask]
+                else:
+                    bench_pairable = False
+            if bench_pairable and b_arr.size >= T_mat:
                 bench_arr = b_arr[:T_mat]
                 fwer_bench_kind = "aligned"
                 fwer_bench_cov = 1.0
+            elif not bench_pairable:
+                fwer_bench_cov = 0.0
+                bench_arr = np.zeros(T_mat)
+                fwer_bench_kind = "zero_fallback"
+                _warn(f"SPA/Romano-Wolf 的基準無法逐期配對:引擎已因缺值整列剔除 "
+                      f"{int((~keep_mask).sum())} 列,而基準長度({b_arr.size} 期)與原始矩陣"
+                      f"列數({int(keep_mask.size)})不符,剔除後無法同步重配對。此檢定已改為 "
+                      "vs 絕對報酬(零基準)誠實執行——勿當作「贏過基準」。",
+                      "fwer_bench_fallback_zero", coverage=0.0,
+                      bench_len=int(b_arr.size), n_periods=int(T_mat))
             else:
                 fwer_bench_cov = float(b_arr.size) / float(T_mat) if T_mat else 0.0
                 bench_arr = np.zeros(T_mat)
@@ -916,19 +1032,60 @@ def analyze(payload: dict) -> dict:
     # ---- 成本壓力(僅有 turnover)----
     cost_out = None
     if turnover is not None and cost_bps is not None:
-        cost_out = cost_stress(returns, turnover, float(cost_bps), ppy)
+        tn = np.asarray(turnover, dtype=float)
+        # R17 收尾:引擎剔除過缺值列 → turnover 以同一 keep_mask 同步剔除,維持逐期配對
+        # (長度對不上原始列數時維持舊的 min 截斷——輸入本身就配不齊,非剔除造成)。
+        if keep_mask is not None and tn.size == keep_mask.size:
+            tn = tn[keep_mask]
+        cost_out = cost_stress(returns, tn, float(cost_bps), ppy)
 
-    # ---- 基準比較 ----
+    # ---- 基準比較(R17 必修4:共同日【配對子集】比較)----
+    #   修前:交集對齊的 bench 只含兩邊都有的日子、策略卻用全序列各自彙總比較 →
+    #   策略多算了基準缺席的日子(交集模式容許到 20%),beats_bench(±8 分、影響 real
+    #   旗標)部分繫於未配對日。修後:主判決仍用策略全序列;只有本卡在配對子集上比——
+    #   前端傳 benchmark_idx(交集日在使用者序列中的索引,與 benchmark_returns 逐位對應);
+    #   引擎若剔除過缺值列,先把配對索引同步剔除並重映射;無 idx 時退回「雙邊截到共同
+    #   長度」的位置配對(等長情形與舊行為逐位相同,不再讓策略單邊多算)。
     bench_cmp = None
     if bench_ret is not None:
-        b = np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)[:n]
+        b = np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)
+        strat_pair = None
+        paired = False
+        if bench_idx is not None:
+            idx = np.asarray(list(bench_idx), dtype=int) if len(bench_idx) else np.empty(0, dtype=int)
+            n_orig = int(keep_mask.size) if keep_mask is not None else n
+            valid = (idx.size == b.size and idx.size >= 2
+                     and int(idx.min()) >= 0 and int(idx.max()) < n_orig)
+            if valid and keep_mask is not None:
+                # 缺值剔除過:落在被剔除列上的配對日一併剔除(基準側同步),再重映射到新座標
+                pair_ok = keep_mask[idx]
+                new_pos = np.cumsum(keep_mask) - 1
+                idx = new_pos[idx[pair_ok]]
+                b = b[pair_ok]
+                valid = idx.size >= 2
+            if valid:
+                strat_pair = returns[idx]
+                paired = True
+            else:
+                _warn("基準配對索引無效(長度/範圍不符,或配對後不足 2 期):"
+                      "退回「雙邊截到共同長度」的位置配對比較。",
+                      "bench_pair_idx_invalid",
+                      idx_len=int(np.asarray(list(bench_idx)).size), bench_len=int(b.size))
+        if strat_pair is None:
+            m_len = int(min(n, b.size))
+            b = b[:m_len]
+            strat_pair = returns[:m_len]
         if b.size >= 2:
             bm = compute_metrics(b, ppy)
-            excess = (metrics["cagr"] - bm["cagr"]) if (np.isfinite(metrics["cagr"]) and np.isfinite(bm["cagr"])) else float("nan")
-            beats = (np.isfinite(metrics["sharpe"]) and np.isfinite(bm["sharpe"])
-                     and metrics["sharpe"] > bm["sharpe"])
+            sm = compute_metrics(strat_pair, ppy)  # 配對子集上的策略指標(僅供本卡)
+            excess = (sm["cagr"] - bm["cagr"]) if (np.isfinite(sm["cagr"]) and np.isfinite(bm["cagr"])) else float("nan")
+            beats = (np.isfinite(sm["sharpe"]) and np.isfinite(bm["sharpe"])
+                     and sm["sharpe"] > bm["sharpe"])
             bench_cmp = {"bench_sharpe": bm["sharpe"], "bench_cagr": bm["cagr"],
-                         "excess_cagr": excess, "strategy_beats": bool(beats)}
+                         "excess_cagr": excess, "strategy_beats": bool(beats),
+                         "paired": bool(paired), "n_paired": int(b.size),
+                         "strat_sharpe_paired": sm["sharpe"],
+                         "strat_cagr_paired": sm["cagr"]}
 
     # ---- 綜合裁決 ----
     verdict = _verdict({
@@ -939,7 +1096,8 @@ def analyze(payload: dict) -> dict:
         "beats_bench": bench_cmp["strategy_beats"] if bench_cmp else None,
         "excess_cagr": bench_cmp["excess_cagr"] if bench_cmp else None,
         "concentration": metrics["top_bar_concentration"],
-        "n_trials": n_trials, "n_periods": n, "real_sharpe": perm["real_sharpe"],
+        "n_trials": n_trials, "n_trials_declared": n_trials_declared,
+        "n_periods": n, "real_sharpe": perm["real_sharpe"],
         "capped_escape": bool(harden_diag["capped_escape"]) if harden_diag else False,
         "dsr_var_proxy": bool(dsr_res.get("sr_variance_proxy", False)),
         "calendar_span_years": span_years,
@@ -949,8 +1107,11 @@ def analyze(payload: dict) -> dict:
     equity_curve = _equity_from_returns(returns).tolist()
     bench_curve = None
     if bench_cmp is not None:
-        b = np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)[:n]
-        bench_curve = _equity_from_returns(b).tolist()
+        b = np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)
+        # R17 收尾:剔除過缺值列 → 基準曲線同步剔除,與主曲線逐期對齊
+        if keep_mask is not None and b.size == keep_mask.size:
+            b = b[keep_mask]
+        bench_curve = _equity_from_returns(b[:n]).tolist()
 
     return {
         "ok": True, "warnings": warnings, "warnings_coded": warnings_coded,
@@ -1034,31 +1195,40 @@ def detect_series_kind(vals) -> str:
 
 
 def nav_to_returns(vals) -> list:
-    """淨值 → 逐期報酬(與 app.js navToReturns 同語意):首期 0;前值非有限或 0 → 該期 0。
-    輸入先做 NaN/None→0 清洗(與 JS clean 一致)。"""
+    """淨值 → 逐期報酬(與 app.js navToReturns 同語意):首期 0;前值為 0 → 該期 0。
+
+    ★R17 必修1:非有限/不可解析值【不再填 0】★——改保留 NaN(自身與下一期的報酬都成
+    NaN,因為兩者都依賴缺失的淨值),交由 analyze 入口的缺值守衛整期剔除或拒審。
+    舊行為(NaN→0 → prev=0 → 報酬 0)等於憑空捏造「持平日」,會稀釋波動,已移除。"""
     clean = []
     for v in (vals or []):
         try:
             f = float(v)
         except (TypeError, ValueError):
-            f = 0.0
-        clean.append(f if np.isfinite(f) else 0.0)
+            f = float("nan")
+        clean.append(f if np.isfinite(f) else float("nan"))
     out = [0.0]
     for i in range(1, len(clean)):
-        prev = clean[i - 1]
-        out.append(clean[i] / prev - 1.0 if (np.isfinite(prev) and prev != 0.0) else 0.0)
+        prev, cur = clean[i - 1], clean[i]
+        if not (np.isfinite(prev) and np.isfinite(cur)):
+            out.append(float("nan"))
+        elif prev == 0.0:
+            out.append(0.0)
+        else:
+            out.append(cur / prev - 1.0)
     return out
 
 
 def _clean_returns(vals) -> list:
-    """報酬欄清洗:NaN/None/不可解析 → 0(與 JS clean 一致)。"""
+    """報酬欄清洗:R17 必修1 起,NaN/None/不可解析【不再填 0】→ 保留 NaN,
+    交由 analyze 入口的缺值守衛整期剔除(<5%)或結構化拒審(≥5%),fail-closed。"""
     out = []
     for v in (vals or []):
         try:
             f = float(v)
         except (TypeError, ValueError):
-            f = 0.0
-        out.append(f if np.isfinite(f) else 0.0)
+            f = float("nan")
+        out.append(f if np.isfinite(f) else float("nan"))
     return out
 
 

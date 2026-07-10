@@ -125,4 +125,24 @@ assert(r1.newR.arr === null && r1.newR.noteKey === 'align_skip_overlap', '情境
 assert(r2.newR.arr !== null && r2.newR.noteKey === 'align_bydate_intersect', '情境2 修後:交集≥80% → 交集誠實比較(align_bydate_intersect)');
 assert(r2.sNew > r2.sOld, '情境2 修後:基準夏普高於修前補0版(稀釋消失)');
 assert(!(r2.sStrat > r2.sNew) && (r2.sStrat > r2.sOld), '情境2:修前 beats=true(放水)、修後 beats=false(誠實)——同一資料,結論翻正');
+
+// ---- R17 必修4:配對索引 idx 的真值斷言 ----
+// 交集模式必回 idx(交集日在使用者序列中的索引,與 benchArr 逐位對應)——引擎用它把
+// 基準比較限制在【共同日配對子集】上,策略不再單邊多算基準缺席的日子。
+const bd2 = makeBenchFlip(); // 確定性重建情境 2 的基準(只依 strat,不耗 rnd 狀態)
+const idx2 = r2.newR.idx;
+assert(Array.isArray(idx2) && idx2.length === r2.newR.arr.length,
+  'R17:交集模式回傳 idx,且與 benchArr 等長(逐位配對)');
+assert(idx2.every((v, k) => k === 0 || v > idx2[k - 1]),
+  'R17:idx 嚴格遞增(照使用者資料順序)');
+const bMap2 = new Map(bd2.dates.map((d, i) => [d, bd2.returns[i]]));
+assert(idx2.every((ui, k) => {
+  const v = bMap2.get(userDates[ui]);
+  return v != null && Math.abs(v - r2.newR.arr[k]) < 1e-12;
+}), 'R17:每個 idx 都指向兩邊皆有的同一天,且 benchArr[k] 恰為該日基準報酬(配對真值)');
+// 配對子集上的策略夏普 ≠ 全序列夏普(= 修前「策略多算了基準缺席日」的偏置確實存在,
+// 引擎現以配對子集判勝負)
+const sPair = sharpe(idx2.map(i => strat[i]));
+assert(Math.abs(sPair - r2.sStrat) > 1e-9,
+  `R17:配對子集策略夏普(${sPair.toFixed(4)})≠ 全序列夏普(${r2.sStrat.toFixed(4)})——未配對日確實影響比較,必須配對`);
 process.exit(fail ? 1 : 0);

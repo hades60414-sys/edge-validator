@@ -73,10 +73,12 @@ class TestNavToReturns:
         r = nav_to_returns([0.0, 50.0, 100.0])
         assert r[0] == 0.0 and r[1] == 0.0 and r[2] == pytest.approx(1.0)
 
-    def test_nan_cleaned_to_zero_like_js(self):
-        # 與 JS clean 一致:NaN/None → 0(後續 prev=0 → 該期報酬 0)
+    def test_nan_propagates_fail_closed(self):
+        # R17 必修1:NaN/None 不再填 0(填 0 = 憑空捏造持平日、稀釋波動)——
+        # 缺失淨值讓自身與下一期報酬都成 NaN,交由 analyze 入口守衛剔除/拒審。
         r = nav_to_returns([100.0, None, 110.0])
-        assert r == [0.0, -1.0, 0.0]
+        assert r[0] == 0.0
+        assert math.isnan(r[1]) and math.isnan(r[2])
 
 
 # ---------------------------------------------------------------------------

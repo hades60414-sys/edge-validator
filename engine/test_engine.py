@@ -91,8 +91,15 @@ def test_analyze_with_benchmark_and_cost():
                    "cost_bps_per_turnover": 10.0, "turnover": turnover.tolist(),
                    "periods_per_year": 252})
     assert out["benchmark_compare"] is not None
+    # R17 必修4:加配對揭露欄(paired/n_paired/策略配對子集指標),純加欄向後相容
     assert set(out["benchmark_compare"]) == {"bench_sharpe", "bench_cagr",
-                                             "excess_cagr", "strategy_beats"}
+                                             "excess_cagr", "strategy_beats",
+                                             "paired", "n_paired",
+                                             "strat_sharpe_paired", "strat_cagr_paired"}
+    # 等長、無 idx → 位置配對 = 舊行為逐位相同:配對策略夏普 == 全序列夏普
+    assert out["benchmark_compare"]["n_paired"] == n
+    assert out["benchmark_compare"]["strat_sharpe_paired"] == pytest.approx(
+        out["metrics"]["sharpe"])
     assert out["cost_stress"] is not None
     assert set(out["cost_stress"]) == {"x1_sharpe", "x3_sharpe", "x6_sharpe"}
     assert out["benchmark_curve"] is not None and len(out["benchmark_curve"]) == n

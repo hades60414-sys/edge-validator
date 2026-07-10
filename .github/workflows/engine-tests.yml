@@ -24,6 +24,19 @@ jobs:
       - name: Run engine tests (fast layer)
         run: pytest engine -m "not slow" -q
 
+  # JS 層:app.js 語法 + alignBenchmark 真值對照(秒級,ubuntu runner 自帶 node)
+  js:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check app.js
+        run: node --check app.js
+      - name: Verify alignBenchmark ground truth
+        run: node tools/verify_align.node.js
+      - name: Verify missing-value fail-closed guards
+        run: node tools/verify_missing.node.js
+
   # 慢層:每週排程 + 手動觸發,跑完整套件(含對抗網格掃描)
   full:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
