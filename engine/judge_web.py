@@ -751,6 +751,37 @@ def _verdict(signals: dict) -> dict:
     else:
         overall = "inconclusive"
 
+    # --- 缺值敏感度 fail-closed(★R21 必修2★)---
+    #   <5% 缺值剔除發生過,且以觀測 min(觀測期間最差單期報酬)補入被剔除期後,DSR 觸發
+    #   兩層降級判準之一(unstable):
+    #     (a) 0.60 向下穿越——敏感度 DSR 從雜訊地板(NOISE_FLOOR=0.60)之上跌破 0.60;
+    #     (b) 0.95 支柱塌陷——原判決倚賴 DSR≥REAL_CONF_BAR(0.95)這根高信心支柱,
+    #         而敏感度 DSR 跌破 0.95(支柱塌了,likely-real 的根據不復存在);
+    #   而原判決會是 likely-real → 降級 inconclusive:被剔除期間的真實報酬不可驗證,
+    #   若實為極端虧損日則 edge 消失——無法驗證,誠實不判 likely-real。
+    #   原判決非 likely-real 或敏感度存活 → 不進此分支,只由警語揭露(不多罰)。
+    ms = signals.get("missing_sens")
+    if overall == "likely-real" and ms and ms.get("unstable"):
+        overall = "inconclusive"
+        bar = float(ms.get("bar_crossed") or 0.60)
+        bar_zh = ("雜訊地板" if bar == ms.get("noise_floor")
+                  else "高信心地板(本判決倚賴的 DSR 支柱)")
+        _reason(f"缺值敏感度下判決不穩:被剔除的 {int(ms['n_missing'])} 期真實報酬不可驗證;"
+                f"若它們實為極端虧損日(以觀測期間最差單期報酬補入試算:年化夏普 "
+                f"{ms['sharpe_observed']:.2f}→{ms['sharpe_sensitivity']:.2f}、DSR "
+                f"{ms['dsr_observed']:.2f}→{ms['dsr_sensitivity']:.2f} 跌破{bar_zh} "
+                f"{bar:.2f}),edge 站不住——缺失期間無法驗證,誠實不判 likely-real,"
+                "降級為結論不明。請補齊缺失期間的真實資料後重驗。",
+                "missing_sensitivity_downgrade", n_missing=int(ms["n_missing"]),
+                fill_value=float(ms["fill_value"]),
+                sharpe_observed=float(ms["sharpe_observed"]),
+                sharpe_sensitivity=float(ms["sharpe_sensitivity"]),
+                dsr_observed=float(ms["dsr_observed"]),
+                dsr_sensitivity=float(ms["dsr_sensitivity"]), bar=bar)
+        _flag(f"缺值敏感度:以觀測最差單期報酬補入被剔除期後 DSR={ms['dsr_sensitivity']:.2f} "
+              f"跌破 {bar:.2f},判決在缺值敏感度下不穩。", "missing_sensitivity_unstable",
+              dsr_sensitivity=float(ms["dsr_sensitivity"]), bar=bar)
+
     # 誠實收尾:過關不等於會賺
     if overall == "likely-real":
         _reason("重要:通過這些檢定只代表『沒發現明顯的過度擬合』,不保證未來會賺——真金白銀前請務必前向(walk-forward)驗證與小額實測。",
@@ -771,6 +802,17 @@ def _verdict(signals: dict) -> dict:
 # ===========================================================================
 # 7. 統一入口
 # ===========================================================================
+def _parse_dates_series(dates):
+    """日期字串 → DatetimeIndex(Series)。R21 必修3:混時區 ISO-8601(+00:00 與 +08:00
+    混用)在 pandas 2/3 會 raise「Mixed timezones detected」——那是正當格式不是垃圾,
+    先原樣解析、失敗改 utc=True 統一重試;仍失敗讓例外傳給呼叫方既有 fallback 承擔。"""
+    s = pd.Series(dates)
+    try:
+        return pd.to_datetime(s)
+    except Exception:
+        return pd.to_datetime(s, utc=True)
+
+
 def _infer_ppy(dates, fallback, warn=None):
     """由日期推年化頻率。warn=可選 (zh, code, **params) 回呼:解析失敗回退 252 時誠實告警
     (修 R12 LOW:舊版裸 except 靜默吞掉壞日期,使用者不知道年化基準已悄悄變 252)。
@@ -792,7 +834,7 @@ def _infer_ppy(dates, fallback, warn=None):
                  "推斷(無日期則回退 252)。", "ppy_invalid", value=str(fallback))
     if dates and len(dates) > 2:
         try:
-            idx = pd.to_datetime(pd.Series(dates))
+            idx = _parse_dates_series(dates)  # R21 必修3:混時區 → utc=True 重試
             total_days = (idx.iloc[-1] - idx.iloc[0]).total_seconds() / 86400.0
             steps = len(idx) - 1
             if total_days > 0 and steps > 0:
@@ -872,7 +914,40 @@ def _date_integrity_guard(values, dates, keep_mask, warn):
         if idx2 is not None and (idx is None
                                  or int(idx2.isna().sum()) < int(idx.isna().sum())):
             idx = idx2
+    # ★R21 必修3:混時區時間戳(+00:00 與 +08:00 混用)會讓上面兩次解析失效——
+    #   ISO-8601 帶時區是正當格式不是垃圾。pandas 版本行為分兩型(R21b 實測補齊):
+    #   (a) 新版(pandas ≥3 預告行為):直接 raise「Mixed timezones detected. Pass
+    #       utc=True」→ idx=None,修前整段守衛【靜默解除】=混時區重複騙局繞過;
+    #   (b) 1.x/2.x 現行行為:回【object dtype】的 Timestamp 序列(無 NaT、不 raise)
+    #       → 修前 utc 重試閘(只看 None/NaT)不觸發,下方 astype("int64") 對 Timestamp
+    #       物件裸炸 TypeError = analyze 整個裸例外(公開站混時區 CSV 直接噴錯)。
+    #   修:兩型都視為「未正確解析」→ utc=True 重試(統一到 UTC 後照常判重/排序;
+    #   同一瞬間的不同時區寫法會正確撞成重複——語意本該如此)。再失敗才跳過,
+    #   且跳過【必發】守衛層警語。
+    _is_obj = (idx is not None and idx.dtype == object)
+    if idx is None or _is_obj or bool(idx.isna().any()):
+        for _kw in ({"utc": True}, {"format": "mixed", "utc": True}):
+            try:
+                idx3 = pd.to_datetime(pd.Series(d_str), errors="coerce", **_kw)
+            except Exception:
+                idx3 = None
+            if (idx3 is not None and idx3.dtype != object
+                    and (idx is None or _is_obj
+                         or int(idx3.isna().sum()) < int(idx.isna().sum()))):
+                idx = idx3
+                _is_obj = False
+            if idx is not None and not _is_obj and not bool(idx.isna().any()):
+                break
+    if idx is not None and idx.dtype == object:
+        # utc 重試後仍是 object dtype(理論上不會發生的兜底)→ 視同整批解析失敗,
+        # 走下方誠實告警跳過(fail-closed 揭露),絕不讓 astype 裸炸。
+        idx = None
     if idx is None:
+        # 連 utc=True 重試都失敗才跳過——修前這條路完全靜默(守衛被解除卻無人知曉)。
+        warn("日期完整性守衛未執行:日期欄整批解析失敗(含統一 UTC 重試)——重複時間戳/"
+             "亂序檢查本次【跳過】,列級完整性未經驗證(跳過不算通過);年化頻率照舊由"
+             "日期通道誠實回退並另行告警。請檢查日期格式(ISO-8601 帶時區者請保持一致)。",
+             "date_guard_skipped_unparseable", n_periods=int(n))
         return values, dates, keep_mask, None, None
     nat = idx.isna().to_numpy()
     n_nat = int(nat.sum())
@@ -977,6 +1052,7 @@ def analyze(payload: dict) -> dict:
     turnover = payload.get("turnover")
     keep_mask = None  # R17 必修1:缺值剔除遮罩(原座標),供基準配對索引重映射
     sort_perm = None  # R19 必修1:日期亂序穩定排序的置換(新座標 j ← 舊座標 sort_perm[j])
+    missing_sens_pend = None  # R21 必修2:缺值剔除敏感度試算的待辦(ppy/DSR 就緒後執行)
     # R19 必修4:基準序列只解析一次;含不可解析型別 → 告警+略過所有基準通道(不裸例外)
     bench_arr_raw = None
     if bench_ret is not None:
@@ -1036,6 +1112,7 @@ def analyze(payload: dict) -> dict:
                     "本引擎誠實拒審(絕不以 0 填補)。請補齊資料後再試。",
                     "missing_rows_reject", n_rows_dropped=n_drop, n_periods=int(T),
                     rate=round(drop_rate, 4), threshold=MISSING_MAX_RATE)
+            dropped_rows = mat[~row_keep]  # R21 必修2:留存被剔列(贏家欄敏感度試算用)
             keep_mask = row_keep
             mat = mat[row_keep]
             T = int(mat.shape[0])
@@ -1044,6 +1121,9 @@ def analyze(payload: dict) -> dict:
             _warn(f"缺值處理:{n_drop} 列含空白/非數值,已【整列剔除】以保持各欄橫斷面對齊"
                   f"(絕不以 0 填補,填 0 會人為壓低波動),有效樣本 {T} 期。",
                   "missing_rows_dropped", n_rows_dropped=n_drop, n_kept=int(T))
+            # ★R21 必修2:待辦——贏家欄(best_k)選定後填入 known_vals,再做敏感度試算★
+            missing_sens_pend = {"n_missing": n_drop, "warn_idx": len(warnings) - 1,
+                                 "dropped_rows": dropped_rows, "known_vals": None}
         # ★R19 必修1:日期完整性守衛(重複時間戳/亂序)——必須在挑最佳欄之前★
         if dates is not None and len(dates) == T:
             mat, dates, keep_mask, sort_perm, rej = _date_integrity_guard(
@@ -1060,6 +1140,10 @@ def analyze(payload: dict) -> dict:
         best_k = int(np.nanargmax(col_sr)) if col_sr.size else 0
         returns = mat[:, best_k]
         trial_sharpes = col_sr
+        # R21 必修2:贏家欄選定 → 被剔列中該欄自己【有值】者用真實值做敏感度(已知就用
+        # 已知,不多罰);只有贏家欄自身缺值的列才進觀測 min 補入。
+        if missing_sens_pend is not None and missing_sens_pend.get("dropped_rows") is not None:
+            missing_sens_pend["known_vals"] = missing_sens_pend.pop("dropped_rows")[:, best_k]
         # ★防雜訊放水:誠實基準 = max(使用者宣稱 n_trials, 欄數),再由 harden 決定有效 n_trials★
         #   達真實信心地板(DSR≥0.95)的真 edge 維持誠實 n_trials;未達地板的最佳欄(與一次
         #   幸運雜訊抽樣不可區分)則上調 n_trials 到 DSR 跌破雜訊地板(0.60),不判為 likely-real。
@@ -1114,6 +1198,9 @@ def analyze(payload: dict) -> dict:
                   f"填 0 會人為壓低波動、抬高夏普),有效樣本 {returns.size} 期,"
                   "統計檢定在剔除後的序列上執行。",
                   "missing_values_dropped", n_missing=n_bad, n_kept=int(returns.size))
+            # ★R21 必修2:記下待辦——ppy/DSR 就緒後做觀測 min 敏感度試算並升級本警語★
+            missing_sens_pend = {"n_missing": n_bad, "warn_idx": len(warnings) - 1,
+                                 "known_vals": None}
         # ★R19 必修1:日期完整性守衛(重複時間戳/亂序)★
         if dates is not None and len(dates) == returns.size and returns.size > 0:
             returns, dates, keep_mask, sort_perm, rej = _date_integrity_guard(
@@ -1140,7 +1227,7 @@ def analyze(payload: dict) -> dict:
     span_years = None
     if dates and len(dates) > 2:
         try:
-            _idx = pd.to_datetime(pd.Series(dates))
+            _idx = _parse_dates_series(dates)  # R21 必修3:混時區 → utc=True 重試
             span_years = float((_idx.iloc[-1] - _idx.iloc[0]).total_seconds()) / (86400.0 * 365.25)
         except Exception:
             span_years = None  # 日期壞掉的告警已由 _infer_ppy 的 ppy_fallback 承擔,不重複
@@ -1183,6 +1270,67 @@ def analyze(payload: dict) -> dict:
            # R12 HIGH 修:returns 模式 n_trials>1 無真試驗池 → 試驗離散度用 SE(SR)² 保守
            # proxy 做【真通縮】(舊版 variance=0 → sr0≡0 → n_trials 無效)。誠實揭露之。
            "sr_var_proxy": bool(dsr_res.get("sr_variance_proxy", False))}
+
+    # ---- 缺值剔除敏感度試算(★R21 必修2:<5% 剔除窗的 fail-closed 收口★)----
+    #   實證騙局:400 期 inconclusive(夏普 ~0.7)的策略挖掉自己最差 19 天(4.75%<5%)
+    #   → 剔除後夏普 ~2.7、86 分 likely-real,只留一句中性警語。真實情境=券商/資料商在
+    #   崩盤日缺檔,誠實資料也會被系統性灌分。政策:被剔除期間的真實報酬【不可驗證】——
+    #   以「缺值集中在極端虧損日」情境補入被剔除期數,只重算夏普與 DSR 兩個數
+    #   (不遞迴整個 verdict;兩者皆順序不變量,補在尾端與補在原位逐位等值)。
+    #   補入值的選擇(實測校準,勿回退 p5):在該情境下每個缺失期 ≤ 觀測最小值,故以
+    #   【觀測期間最差單期報酬(min)】補入=該情境的溫和下界(非無界最壞)。曾試
+    #   觀測 p5:對上述騙局補入後 DSR 仍 0.97,連高信心地板(0.95)都打不破=規則形同
+    #   虛設;min 補入把騙局壓到 0.93 而誠實強 edge(夏普 2.5+、2% 隨機缺值)仍 ≥0.99,
+    #   校準見 test_r21。
+    missing_sens = None
+    if missing_sens_pend is not None and returns.size >= 2:
+        fill_v = float(np.min(returns))
+        kv = missing_sens_pend.get("known_vals")
+        if kv is not None:
+            kv = np.asarray(kv, dtype=float)
+            fill = np.where(np.isfinite(kv), kv, fill_v)
+        else:
+            fill = np.full(int(missing_sens_pend["n_missing"]), fill_v)
+        r_sens = np.concatenate([returns, fill])
+        sharpe_obs = float(metrics["sharpe"])
+        sharpe_sens = float(_sharpe_periodic(r_sens) * np.sqrt(ppy))
+        dsr_obs = float(dsr["dsr_prob"]) if dsr["dsr_prob"] is not None else float("nan")
+        dsr_sens = float(deflated_sharpe(r_sens, n_trials, trial_sharpes)["dsr"])
+        # 不穩判準(兩層,擇一即不穩;實測校準過,見 test_r21):
+        # (a) 跌破雜訊地板(0.60)——涵蓋 DSR 0.60~0.95 靠其他閘湊分的 likely-real;
+        # (b) 原 DSR ≥0.95(likely-real 倚賴的高信心支柱)而補入後跌破 0.95——
+        #     單序列 n_trials=1 時 DSR=PSR(>0),任何合理補入都壓不到 0.60(實測:
+        #     挖最差 19/400 的騙局補 p5 後 DSR 仍 0.97),只設 (a) 會讓 fail-closed
+        #     形同虛設;支柱塌了(高信心不再)才是「判決繫於不可驗證期間」的正確判準。
+        cross_floor = bool(np.isfinite(dsr_sens) and dsr_sens < NOISE_FLOOR
+                           and np.isfinite(dsr_obs) and dsr_obs >= NOISE_FLOOR)
+        cross_conf = bool(np.isfinite(dsr_sens) and np.isfinite(dsr_obs)
+                          and dsr_obs >= REAL_CONF_BAR and dsr_sens < REAL_CONF_BAR)
+        unstable = cross_floor or cross_conf
+        bar_crossed = NOISE_FLOOR if cross_floor else (REAL_CONF_BAR if cross_conf else None)
+        missing_sens = {"n_missing": int(missing_sens_pend["n_missing"]),
+                        "fill_value": fill_v,
+                        "sharpe_observed": sharpe_obs, "sharpe_sensitivity": sharpe_sens,
+                        "dsr_observed": dsr_obs, "dsr_sensitivity": dsr_sens,
+                        "noise_floor": NOISE_FLOOR, "conf_bar": REAL_CONF_BAR,
+                        "unstable": unstable, "bar_crossed": bar_crossed,
+                        "winner_known_used": bool(kv is not None)}
+        # 警語升級(同 index 原地改寫,zh 與 coded params 同步):中性一句話 →
+        # 「真實報酬不可驗證+缺值集中在極端虧損日會高估」+敏感度數字,絕不輕描淡寫。
+        wi = int(missing_sens_pend["warn_idx"])
+        warnings[wi] = (warnings[wi]
+                        + f"注意:被剔除期間的真實報酬【不可驗證】——若缺值集中在極端虧損日,"
+                          f"績效與判決會被高估。敏感度試算(被剔除的 "
+                          f"{missing_sens['n_missing']} 期以觀測期間最差單期報酬 "
+                          f"{fill_v:.4f} 補入"
+                        + ("、贏家欄自身有值的列用真實值" if kv is not None else "")
+                        + f"):年化夏普 {sharpe_obs:.2f}→{sharpe_sens:.2f}、"
+                          f"DSR {dsr_obs:.2f}→{dsr_sens:.2f}。")
+        warnings_coded[wi]["params"].update({
+            "fill_value": fill_v, "sharpe_observed": sharpe_obs,
+            "sharpe_sensitivity": sharpe_sens,
+            "dsr_observed": dsr_obs, "dsr_sensitivity": dsr_sens,
+            "winner_known_used": bool(kv is not None)})
 
     # ---- permutation null ----
     perm = permutation_null(returns, ppy, n_perm=n_perm_eff)
@@ -1354,10 +1502,25 @@ def analyze(payload: dict) -> dict:
         paired = False
         skip_pair = False
         if bench_idx is not None:
-            idx = np.asarray(list(bench_idx), dtype=int) if len(bench_idx) else np.empty(0, dtype=int)
+            # ★R21 必修4:benchmark_idx 型別硬化(direct-API 契約)——修前非可迭代(7)在
+            #   len() 裸 TypeError、字串元素(['a'])在 dtype=int 裸 ValueError、非整數浮點
+            #   (1.9)被 astype(int) 【靜默地板截斷】照常配對(配對座標悄悄挪動)。一律改判
+            #   invalid → 走既有 bench_pair_idx_invalid 警語+位置配對退路(不裸例外);
+            #   整值浮點(1.0)無歧義,照整數接受。
+            idx = None
+            _idx_len = 0
+            try:
+                _idx_f = np.asarray(list(bench_idx), dtype=float)
+                _idx_len = int(_idx_f.size)
+                if _idx_f.ndim == 1 and (_idx_f.size == 0 or (
+                        bool(np.all(np.isfinite(_idx_f)))
+                        and bool(np.all(_idx_f == np.floor(_idx_f))))):
+                    idx = _idx_f.astype(int)
+            except (TypeError, ValueError):
+                idx = None
             n_orig = int(keep_mask.size) if keep_mask is not None else n
             # R19 必修4:idx 需【唯一】——重複索引會把同一天算兩次(灌水配對樣本)
-            valid = (idx.size == b.size and idx.size >= 2
+            valid = (idx is not None and idx.size == b.size and idx.size >= 2
                      and int(idx.min()) >= 0 and int(idx.max()) < n_orig
                      and int(np.unique(idx).size) == int(idx.size))
             idx_input_invalid = not valid
@@ -1380,10 +1543,10 @@ def analyze(payload: dict) -> dict:
                 strat_pair = returns[idx]
                 paired = True
             elif idx_input_invalid:
-                _warn("基準配對索引無效(長度/範圍/唯一性不符或不足 2 期):"
-                      "退回「雙邊截到共同長度」的位置配對比較。",
+                _warn("基準配對索引無效(長度/範圍/唯一性/型別不符——非整數、非數值或"
+                      "不可迭代——或不足 2 期):退回「雙邊截到共同長度」的位置配對比較。",
                       "bench_pair_idx_invalid",
-                      idx_len=int(np.asarray(list(bench_idx)).size), bench_len=int(b.size))
+                      idx_len=_idx_len, bench_len=int(b.size))
             else:
                 # R19 順修 LOW:配對索引重映射後剩 <2 對——此時基準已是配對子集、無法退回
                 # 位置配對(會逐期錯位),誠實【略過】本卡並照實說明(舊警語謊稱「退回位置配對」)。
@@ -1438,6 +1601,7 @@ def analyze(payload: dict) -> dict:
         "capped_escape": bool(harden_diag["capped_escape"]) if harden_diag else False,
         "dsr_var_proxy": bool(dsr_res.get("sr_variance_proxy", False)),
         "calendar_span_years": span_years,
+        "missing_sens": missing_sens,  # R21 必修2:缺值敏感度(無缺值剔除時為 None)
     })
 
     # ---- equity curves ----
@@ -1459,6 +1623,7 @@ def analyze(payload: dict) -> dict:
         "metrics": metrics, "dsr": dsr, "permutation_null": perm,
         "pbo": pbo_out, "fwer": fwer_out, "cost_stress": cost_out,
         "benchmark_compare": bench_cmp, "verdict": verdict,
+        "missing_sensitivity": missing_sens,  # R21 必修2(無缺值剔除時 None,加欄向後相容)
         "equity_curve": equity_curve, "benchmark_curve": bench_curve,
     }
 

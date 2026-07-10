@@ -68,6 +68,29 @@ def test_readme_appjs_line_claim_within_tolerance():
     )
 
 
+def test_readme_fwer_calibration_claim_matches_engine_docstring():
+    """R21 必修1:README 的 FWER 校準宣稱釘死在引擎 docstring 授權的誠實區間。
+
+    引擎 run_fwer_gates docstring 實測:AR(1)=0.30 下名目 10%/5% 打 12.5%/7.5%
+    (= +2.5pp),展示層據此只講「已校準(誤差 ±3pp 內)」。README 曾漂移成
+    「+1pp 以內」超宣稱(R20 panel MED)——本測試禁止該類字樣重現,並要求
+    與 docstring 一致的 +1~3pp / ±3pp 區間措辭存在;docstring 自身的區間錨也一併釘住。"""
+    text = _readme_text()
+    # 超宣稱字樣禁令(「+1pp」「1pp 以內」等;+1~3pp 為合法區間寫法,不誤傷)
+    assert not re.search(r"\+\s*1\s*pp\s*以內", text), "README 出現「+1pp 以內」超宣稱"
+    assert not re.search(r"\+1pp(?![~〜-])", text), "README 出現「+1pp」超宣稱字樣"
+    assert not re.search(r"1\s*pp\s*以內", text), "README 出現「1pp 以內」超宣稱字樣"
+    # 必含與 docstring 一致的誠實區間措辭
+    assert re.search(r"\+\s*1\s*[~〜-]\s*3\s*pp", text), (
+        "README 缺少與引擎 docstring 一致的「+1~3pp」殘餘偽陽區間措辭")
+    assert re.search(r"±\s*3\s*pp", text), "README 缺少「已校準(誤差 ±3pp 內)」措辭"
+    # docstring 錨:引擎自書的實測區間與 ±3pp 定位仍在(兩邊一起漂移才允許改這裡)
+    src = (ROOT / "engine" / "judge_web.py").read_text(encoding="utf-8")
+    assert "1-3pp" in src and "±3pp" in src, (
+        "engine/judge_web.py docstring 的校準區間錨(1-3pp / ±3pp)不見了——"
+        "若校準結論真的變了,請同步更新 README 與本測試")
+
+
 def test_readme_statshim_line_claims_exact():
     """statshim 的行數宣稱不帶「約」(中文「N 行換掉」與英文 "N-line")→ 精確,零容忍。"""
     text = _readme_text()

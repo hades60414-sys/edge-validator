@@ -145,4 +145,55 @@ assert(idx2.every((ui, k) => {
 const sPair = sharpe(idx2.map(i => strat[i]));
 assert(Math.abs(sPair - r2.sStrat) > 1e-9,
   `R17:配對子集策略夏普(${sPair.toFixed(4)})≠ 全序列夏普(${r2.sStrat.toFixed(4)})——未配對日確實影響比較,必須配對`);
+
+// ---- R20 必修5:淨值圖基準線 x 座標真值(抽出貨的 mkPath / decimateKeepPositions eval)----
+// 修前:X 以 equity 長度建座標、bench 第 i 點畫在 X(i) → 基準覆蓋 <100% 時基準線
+// 視覺左壓、提前終止。修後:mkPath 接 periods(期座標陣列),bench 第 k 點畫在
+// X(idx[k]);抽稀改「保留位置」(decimateKeepPositions),(期座標, 值) 成對抽不錯位。
+console.log('\n=== R20 必修5:基準線期座標真值 ===');
+const mMkPath = appSrc.match(/function mkPath\([\s\S]*?\n}/);
+const mDeci = appSrc.match(/function decimateKeepPositions\([\s\S]*?\n}\n/);
+assert(mMkPath && mDeci, 'R20:app.js 抽得到 mkPath 與 decimateKeepPositions');
+const document = {
+  createElementNS: () => {
+    const attrs = {};
+    return { setAttribute: (k, v) => { attrs[k] = String(v); }, getAttribute: (k) => attrs[k] };
+  },
+};
+const SVGNS = 'svg';
+// eslint-disable-next-line no-eval
+const { mkPath, decimateKeepPositions } = eval(
+  '(function(){ ' + mMkPath[0] + '\n' + mDeci[0] + '\n return { mkPath, decimateKeepPositions }; })()');
+
+// 情境:策略 200 期、基準覆蓋 85%(缺每 7 日一天)→ idx 為交集日的策略期座標
+const srcN2 = 200, padL = 46, iw = 640 - 46 - 16;
+const Xfn = (i) => padL + (i / (srcN2 - 1)) * iw;
+const Yfn = (v) => v; // y 不在本測試範圍
+const bIdx = []; for (let i = 0; i < srcN2; i++) if (i % 7 !== 0) bIdx.push(i);
+const bVals = bIdx.map(i => 1 + i * 0.001);
+const pNew = mkPath(bVals, Xfn, Yfn, 'eq-bench', bIdx);
+const dNew = pNew.getAttribute('d');
+const lastXY = dNew.trim().split(' L ').pop().trim().split(' ');
+const lastX = parseFloat(lastXY[0]);
+assert(Math.abs(lastX - Xfn(bIdx[bIdx.length - 1])) < 1e-9,
+  `R20:基準末點 x=${lastX.toFixed(2)} = X(idx 最後一格 ${bIdx[bIdx.length - 1]})=${Xfn(bIdx[bIdx.length - 1]).toFixed(2)}(畫在對應策略期座標)`);
+assert(Math.abs(lastX - Xfn(bVals.length - 1)) > 1,
+  `R20:基準末點 x ≠ X(bench.length-1)=${Xfn(bVals.length - 1).toFixed(2)}(修前的左壓/提前終止座標)`);
+// 修前行為重現:不帶 periods → 末點落在 X(bench.length-1)(提前終止確實是舊刀)
+const dOld = mkPath(bVals, Xfn, Yfn, 'eq-bench').getAttribute('d');
+const lastXOld = parseFloat(dOld.trim().split(' L ').pop().trim().split(' ')[0]);
+assert(Math.abs(lastXOld - Xfn(bVals.length - 1)) < 1e-9,
+  'R20:無 periods 時 mkPath 維持舊位置行為(等長位置配對的既有語意不變)');
+
+// 抽稀成對:60k 期序列 → 保留位置遞增、首末在列,(期座標, 值) 成對映射不錯位
+const bigIdx = []; const bigVals = [];
+for (let i = 0; i < 60000; i++) { if (i % 9 !== 0) { bigIdx.push(i); bigVals.push(Math.sin(i / 97) + i * 1e-5); } }
+const keep = decimateKeepPositions(bigVals);
+assert(Array.isArray(keep) && keep[0] === 0 && keep[keep.length - 1] === bigVals.length - 1
+  && keep.every((v, k) => k === 0 || v > keep[k - 1]),
+  'R20:抽稀保留位置嚴格遞增且含首末點');
+const decVals = keep.map(p => bigVals[p]);
+const decPer = keep.map(p => bigIdx[p]);
+assert(decVals.every((v, k) => v === bigVals[keep[k]]) && decPer.every((v, k) => v === bigIdx[keep[k]]),
+  'R20:(期座標, 值) 成對抽稀——同一保留位置同步映射,絕不錯位');
 process.exit(fail ? 1 : 0);

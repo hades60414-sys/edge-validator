@@ -2,15 +2,15 @@
 
 **照妖鏡先照自己**:這份表逐格列出「輸入通道 × 異常型態」的引擎政策——每一格要嘛有明確行為(接受/警語/剔除/拒審)且被測試釘死,要嘛誠實標「未防禦」並寫明理由。沒有「靜默」格。
 
-原則(整站一致):**fail-closed、絕不靜默替換、絕不填 0**。缺值/重複/無效率的統一門檻 = **5%**(`MISSING_MAX_RATE`):低於門檻 → 剔除受影響列並以警語揭露;達到門檻 → 結構化拒審(不是裸例外)。雙層防禦:前端 `parseCSV`(`app.js`)先擋,引擎 `analyze`(`engine/judge_web.py`)再擋——引擎同時是文件化的 direct-API 契約,本地 Streamlit 版直呼。
+原則(整站一致):**fail-closed、絕不靜默替換、絕不填 0**。缺值/重複/無效率的統一門檻 = **5%**(`MISSING_MAX_RATE`):低於門檻 → 剔除受影響列並以警語揭露;達到門檻 → 結構化拒審(不是裸例外)。分工(★R21b★):前端 `parseCSV`(`app.js`)只做 **≥5% 快速拒審**(fail-fast UX,與引擎同判準)與 `pw_missing_detected` 揭露;**<5% 缺值【保留缺值位】(NaN→JSON null)連同日期原樣送引擎**,剔列/敏感度試算/降級全由引擎 `analyze`(`engine/judge_web.py`)執行——修前前端 <5% 先剔列,引擎在瀏覽器路徑永遠看不到 NaN,R21 敏感度機制在公開站是死碼(R21 驗收官 A 的 MED)。引擎同時是文件化的 direct-API 契約,本地 Streamlit 版直呼。null 直通真值:`verify_missing` 情境7(挖最差 19/400 → payload 含 19 個 null 逐位對應)。
 
-測試錨點:`engine/test_r17.py`、`engine/test_r19.py`、`engine/test_engine.py`、`engine/test_detect_convert.py`(pytest);`tools/verify_missing.node.js`、`tools/verify_integrity.node.js`、`tools/verify_align.node.js`(前端路徑 node 真值)。
+測試錨點:`engine/test_r17.py`、`engine/test_r19.py`、`engine/test_r21.py`、`engine/test_engine.py`、`engine/test_detect_convert.py`(pytest);`tools/verify_missing.node.js`、`tools/verify_integrity.node.js`、`tools/verify_align.node.js`(前端路徑 node 真值)。
 
 ## returns(單一報酬序列)
 
 | 異常 | 政策 | 測試 |
 |---|---|---|
-| 缺值 NaN/null <5% | 整期剔除 + 警語 `missing_values_dropped`(dates 同步) | `test_r17.py::test_missing_small_dropped_matches_hand_cleaned`;`verify_missing` 情境2 |
+| 缺值 NaN/null <5% | 整期剔除 + 警語 `missing_values_dropped`(dates 同步)。**R21 加敏感度 fail-closed**:被剔除期真實報酬不可驗證 → 以「缺值集中在極端虧損日」情境(觀測最差單期報酬補入;p5 實測打不破 0.95 支柱=規則形同虛設,故用 min)重算夏普/DSR 併入警語;跌破雜訊地板(0.60)或高信心地板(0.95,判決倚賴的 DSR 支柱)且原判決為 likely-real → 降級 inconclusive(`missing_sensitivity_downgrade`);其餘只揭露不降級 | `test_r17.py::test_missing_small_dropped_matches_hand_cleaned`;`test_r21.py::test_missing_scam_downgraded_not_likely_real`、`::test_missing_sensitivity_honest_strong_edge_survives`、`::test_no_missing_clean_path_unchanged`;`verify_missing` 情境2 |
 | 缺值 ≥5% | 結構化拒審 `missing_values_reject` | `test_r17.py::test_missing_scam_rejected_returns_mode`;`verify_missing` 情境1 |
 | ±inf | 視同缺值(`isfinite` 判準),走上兩格 | `test_r19.py::test_inf_treated_as_missing` |
 | 非數字型別(字串等) | 結構化拒審 `invalid_values_type`(不裸例外);前端 `parseNumberCell` 先轉 NaN 走缺值通道 | `test_r19.py::test_invalid_values_type_structured_reject` |
@@ -33,7 +33,7 @@
 |---|---|---|
 | 任一欄缺值 ≥5% | 拒審 `missing_values_reject`(帶欄名) | `test_r17.py::test_missing_matrix_column_reject_names_column`;`verify_missing` 情境3 |
 | 各欄 <5% 但含缺格列合計 ≥5% | 拒審 `missing_rows_reject` | `test_r17.py::test_missing_matrix_union_rate_rejects`;`verify_missing` 情境5 |
-| 缺格列合計 <5% | 整列剔除(橫斷面對齊)+ `missing_rows_dropped` | `test_r17.py::test_missing_matrix_rows_dropped_keeps_alignment`;`verify_missing` 情境4 |
+| 缺格列合計 <5% | 整列剔除(橫斷面對齊)+ `missing_rows_dropped`。**R21 加贏家欄敏感度 fail-closed**(同 returns 格政策):被剔列中贏家欄自己有值者用真實值補(已知就用已知)、贏家欄自身缺值才補觀測 min;跌破 0.60/0.95 且原判 likely-real → 降級 | `test_r17.py::test_missing_matrix_rows_dropped_keeps_alignment`;`test_r21.py::test_missing_sensitivity_matrix_winner_uses_known_values`;`verify_missing` 情境4 |
 | 欄名重複 | 前端:後欄改名 `名稱(2)` 保留 + `pw_dup_colname`(修前後欄**靜默覆蓋**前欄) | `verify_integrity` 情境7 |
 | 欄名重複(引擎端) | **未防禦(結構上不可見)**——matrix 以 JSON 物件/Python dict 傳遞,鍵唯一性在解析層已強制(後鍵勝),引擎收到時重複已消失;防線只能在前端(已設) | 誠實聲明 |
 | 非數字型別 | 拒審 `invalid_values_type` | `test_r19.py::test_invalid_values_type_structured_reject` |
@@ -53,6 +53,8 @@
 | 部分不可解析(垃圾日期在場;**毒日期繞過已封,R19b**) | 逐元素 `errors="coerce"`:**可解析列照常做時戳級重複判定**(修前任一垃圾日期讓整個守衛 early-return——1 格 "n/a" 即可靜默解除重複守衛;分母=全列數、門檻照舊 5%);垃圾(NaT)列**不參與重複判定**(N/A 不是時戳,identical 垃圾字串不構成「複製好日子」證據,屬「日期壞掉」問題交 `ppy_fallback` 承擔);任一 NaT 在場 → **跳過時序排序步**(無法建立全序)+ `dates_partially_unparseable` 揭露(排序只在全可解析時發生,keep_mask/sort_perm 座標語意不變)。前端 `applyDateIntegrity` 完全同政策(`pw_dates_partial_unparseable`;修前 identical 垃圾字串被當重複時戳 → 值全有效+幾列 "N/A" 日期整檔誤殺拒審) | `test_r19.py::test_poison_date_cannot_disarm_duplicate_guard`、`::test_partial_garbage_dates_skip_sort_disclosed`、`::test_small_dup_with_garbage_dropped_and_disclosed`;`verify_integrity` 情境8 |
 | 全部不可解析(全垃圾) | **行為等同無日期**(列級檢查不執行、不給新能力;無「部分解析」警語——沒有可解析列可言);年化回退 252 + `ppy_fallback` 警語 | `test_r19.py::test_unparseable_dates_skip_row_guard_keep_ppy_fallback`、`::test_all_garbage_dates_equivalent_to_no_dates`;`test_engine.py::test_ppy_fallback_warning_on_bad_dates` |
 | 長度與 values 不符 | 警語 `dates_len_mismatch`(日期僅用於頻率推斷,列級檢查不執行;修前完全靜默) | `test_r19.py::test_dates_length_mismatch_warned` |
+| **混時區時間戳**(+00:00 與 +08:00 混用,正當 ISO-8601) | **R21 必修3(R21b 補齊 pandas 版本分歧)**:pandas ≥3 預告行為=整批解析 raise「Mixed timezones detected」→ 修前 idx=None → 守衛【靜默解除】=混時區重複騙局繞過;pandas 1.x/2.x 現行行為=回 **object dtype** Timestamp 序列(無 NaT、不 raise)→ R21 只看 None/NaT 的重試閘不觸發,`astype("int64")` 對 Timestamp 物件裸炸 TypeError(公開站混時區 CSV 直接噴例外)。修後兩型都視為「未正確解析」→ `utc=True` 重試:統一 UTC 後照常判重/排序(同一瞬間的不同時區寫法正確撞成重複);utc 重試後仍 object dtype 的兜底 → 視同整批解析失敗走誠實跳過警語;ppy/跨度通道同樣 utc 重試(不再假 `ppy_fallback`) | `test_r21.py::test_mixed_timezone_duplicate_scam_caught`、`::test_mixed_timezone_clean_guard_runs_and_ppy_inferred`、`::test_mixed_timezone_small_dup_dropped` |
+| **整批解析例外**(含 utc 重試皆失敗) | 守衛跳過 + **必發** `date_guard_skipped_unparseable` 警語(修前完全靜默;跳過不算通過)。註:與「全垃圾字串」(coerce 全 NaT=行為等同無日期,上格政策)不同——本格是解析層丟例外的防線 | `test_r21.py::test_date_guard_total_parse_failure_skips_with_warning` |
 | 極端跨度(遠古/未來年份) | **未防禦(接受)**——ppy/跨度照資料推;短窗已有 `short_calendar_span` 警語,長窗無已知灌分路徑 | 誠實聲明 |
 
 ## benchmark_returns(對照基準)——R19 必修3 主戰場
@@ -73,6 +75,7 @@
 | 異常 | 政策 | 測試 |
 |---|---|---|
 | 長度/範圍不符 | 判無效 → 警語 `bench_pair_idx_invalid` + 位置配對退路 | `test_r17.py::test_bench_pair_idx_invalid_falls_back_with_warning` |
+| **型別異常**(字串元素/非可迭代/非整數浮點) | **R21 必修4**:修前 `['a']*50` → ValueError 裸崩、`7` → TypeError 裸崩、非整數浮點被 `astype(int)` 靜默地板截斷照常配對。修後一律判無效 → `bench_pair_idx_invalid` 警語 + 位置配對退路;整值浮點(1.0)無歧義照整數接受(與 int 索引逐位一致) | `test_r21.py::test_bench_idx_type_anomalies_warn_and_fall_back`(三態參數化)、`::test_bench_idx_integral_floats_accepted_as_ints` |
 | **索引重複** | 判無效(同一天算兩次=灌水配對樣本;R19 新防禦) | `test_r19.py::test_bench_idx_duplicates_invalid` |
 | 剔列同步後 <2 對 | 誠實**略過**基準比較 + `bench_pair_too_few`(修前警語謊稱「退回位置配對」實際整卡跳過——措辭分流講真話) | `test_r19.py::test_bench_pair_too_few_honest_skip_wording` |
 | 缺值剔列後座標失效 | keep_mask 同步剔除+重映射 | `test_r17.py::test_bench_pair_remaps_after_missing_drop` |

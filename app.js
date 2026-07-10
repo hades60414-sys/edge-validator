@@ -205,8 +205,7 @@ const STRINGS = {
       + '請補齊資料,或移除缺值過多的欄/期後再上傳。',
     perr_missing_rows_reject: (nDrop, nTotal, pct) => `缺值拒審:各欄缺格雖皆 <5%,但含缺格的資料列合計 ${nDrop}/${nTotal} 列(${pct}%)`
       + '——整列剔除以保持各欄對齊後,樣本失真過大。本工具絕不以 0 填補,請補齊資料後再上傳。',
-    pw_missing_dropped: (col, nBad, nTotal) => `缺值處理:欄「${col}」有 ${nBad}/${nTotal} 格空白或非數字,該期已【整列剔除】——絕不以 0 填補(填 0 會人為壓低波動、抬高夏普)。`,
-    pw_missing_rows: (nDrop, nTotal) => `缺值處理:含缺格的 ${nDrop}/${nTotal} 列已整列剔除(保持各欄橫斷面對齊),統計檢定在剔除後的資料上執行。`,
+    pw_missing_detected: (col, nBad, nTotal) => `缺值偵測:欄「${col}」有 ${nBad}/${nTotal} 格空白或非數字(<5%)。資料已【原樣】交給引擎誠實處理——由引擎整列剔除、做缺值敏感度試算,絕不以 0 填補(填 0 會人為壓低波動、抬高夏普)。`,
     pw_empty_col_dropped: (i) => `第 ${i} 欄無標題且全欄無數字(常見於行尾多餘逗號),已忽略該欄。`,
     // —— 日期完整性 fail-closed(R19)——
     perr_dup_dates_reject: (nDup, nTotal, pct) => `日期重複拒審:${nDup}/${nTotal} 列(${pct}%)的時間戳記與先前列完全相同。`
@@ -525,8 +524,7 @@ const STRINGS = {
       + 'Fill in the data, or remove the offending column/periods, then re-upload.',
     perr_missing_rows_reject: (nDrop, nTotal, pct) => `Refused: missing values. Each column is <5% missing, but rows containing gaps total ${nDrop}/${nTotal} (${pct}%) `
       + '— dropping them whole (required to keep the columns aligned) would distort the sample too much. This tool never zero-fills; please fill the gaps and re-upload.',
-    pw_missing_dropped: (col, nBad, nTotal) => `Missing values: column "${col}" has ${nBad}/${nTotal} blank or non-numeric cells; those periods were DROPPED whole — never zero-filled (zero-filling artificially deflates volatility and inflates the Sharpe).`,
-    pw_missing_rows: (nDrop, nTotal) => `Missing values: ${nDrop}/${nTotal} rows containing gaps were dropped whole (keeping the columns cross-sectionally aligned); all tests run on the cleaned data.`,
+    pw_missing_detected: (col, nBad, nTotal) => `Missing values detected: column "${col}" has ${nBad}/${nTotal} blank or non-numeric cells (<5%). The data is passed to the engine AS-IS for honest handling — the engine drops those periods whole, runs a missing-value sensitivity check, and never zero-fills (zero-filling artificially deflates volatility and inflates the Sharpe).`,
     pw_empty_col_dropped: (i) => `Column ${i} has no header and no numbers at all (usually a trailing comma); it was ignored.`,
     // —— date integrity fail-closed (R19) ——
     perr_dup_dates_reject: (nDup, nTotal, pct) => `Refused: duplicate dates. ${nDup}/${nTotal} rows (${pct}%) carry a timestamp identical to an earlier row. `
@@ -727,11 +725,13 @@ const STRINGS = {
     rc_short_calendar_span: (p) => `The data spans only ${fmt(p.span_years, 2)} calendar years (under half a year): annualized Sharpe / CAGR / vol are a short window extrapolated to a full year and easily overstate the magnitude — treat annualized numbers as directional only, not a promise.`,
     rc_closing_likely_real: () => 'Important: passing these tests only means "no obvious overfitting was found" — it does not guarantee future profit. Before real money, always walk-forward validate and live-test at small size.',
     rc_closing_inconclusive: () => "Inconclusive: the evidence isn't enough to call it real or fake. Gather more samples or run a forward test before deciding.",
+    rc_missing_sensitivity_downgrade: (p) => `Verdict unstable under missing-value sensitivity: the true returns of the ${p.n_missing} dropped period(s) are unverifiable; if they were in fact extreme loss days (sensitivity check imputing the worst observed per-period return: annualized Sharpe ${fmt(p.sharpe_observed, 2)}→${fmt(p.sharpe_sensitivity, 2)}, DSR ${fmt(p.dsr_observed, 2)}→${fmt(p.dsr_sensitivity, 2)}, falling below the ${fmt(p.bar, 2)} bar), the edge does not hold — the missing periods cannot be verified, so this engine honestly refuses to call it likely-real and downgrades to inconclusive. Re-run with the missing periods filled with real data.`,
     rc_closing_likely_overfit: () => "Reminder: even if some metrics look good, the red flags above say this strategy is most likely an overfit artifact — don't bet real money on it.",
     rc_no_data: () => 'No data.',
     // red flags(rf_)
     rf_dsr_below_noise_floor: (p) => `DSR=${fmt(p.dsr, 2)} is below the 0.60 noise floor.`,
     rf_capped_escape: () => 'Capped escape: with the trial count scaled to its cap, DSR still sits above the noise floor — too many columns / too short a sample to rule out overfitting.',
+    rf_missing_sensitivity_unstable: (p) => `Missing-value sensitivity: with the dropped periods imputed at the worst observed per-period return, DSR=${fmt(p.dsr_sensitivity, 2)} falls below ${fmt(p.bar, 2)} — the verdict is unstable under missing-value sensitivity.`,
     rf_pbo_high: (p) => `PBO=${fmt(p.pbo, 2)} > 0.50.`,
     rf_perm_noise: (p) => `Permutation p=${fmt(p.p, 2)} > 0.50.`,
     rf_cost_x3_negative: () => 'Sharpe turns negative after ×3 cost stress.',
@@ -748,12 +748,12 @@ const STRINGS = {
     rw_fwer_bench_fallback_zero: (p) => `SPA / Romano–Wolf benchmark fallback: your benchmark covers only ${Math.round((p.coverage || 0) * 100)}% of periods (${p.bench_len}/${p.n_periods}) and cannot be paired period-by-period, so these tests honestly compare against a ZERO benchmark (absolute return) instead — different in meaning from the Benchmark card, do not read "survivors" as "beat the benchmark."`,
     rw_ppy_fallback: (p) => `Date column failed to parse (${p.error}): annualization frequency fell back to 252 (daily). If your data is not daily, annualized Sharpe / CAGR will be distorted — fix the date format or set periods-per-year explicitly.`,
     // 缺值 fail-closed(R17 必修1,引擎守衛層)
-    rw_missing_values_dropped: (p) => `Missing values: ${p.n_missing} period(s) with blank/non-numeric cells were DROPPED whole (never zero-filled — zero-filling artificially deflates volatility and inflates the Sharpe); ${p.n_kept} valid periods remain and all tests run on the cleaned series.`,
-    rw_missing_rows_dropped: (p) => `Missing values: ${p.n_rows_dropped} row(s) containing blank/non-numeric cells were dropped whole to keep the columns cross-sectionally aligned (never zero-filled); ${p.n_kept} valid periods remain.`,
+    rw_missing_values_dropped: (p) => `Missing values: ${p.n_missing} period(s) with blank/non-numeric cells were DROPPED whole (never zero-filled — zero-filling artificially deflates volatility and inflates the Sharpe); ${p.n_kept} valid periods remain and all tests run on the cleaned series.${p.sharpe_sensitivity != null ? ` Caution: the true returns of the dropped periods are UNVERIFIABLE — if the gaps cluster on extreme loss days, performance and the verdict are overstated. Sensitivity check (the ${p.n_missing} dropped period(s) imputed at the worst observed per-period return ${fmt(p.fill_value, 4)}): annualized Sharpe ${fmt(p.sharpe_observed, 2)}→${fmt(p.sharpe_sensitivity, 2)}, DSR ${fmt(p.dsr_observed, 2)}→${fmt(p.dsr_sensitivity, 2)}.` : ''}`,
+    rw_missing_rows_dropped: (p) => `Missing values: ${p.n_rows_dropped} row(s) containing blank/non-numeric cells were dropped whole to keep the columns cross-sectionally aligned (never zero-filled); ${p.n_kept} valid periods remain.${p.sharpe_sensitivity != null ? ` Caution: the true returns of the dropped rows are UNVERIFIABLE — if the gaps cluster on extreme loss days, performance and the verdict are overstated. Sensitivity check (dropped rows imputed at the worst observed per-period return ${fmt(p.fill_value, 4)}${p.winner_known_used ? ', using the winner column’s actual value where that row had one' : ''}): annualized Sharpe ${fmt(p.sharpe_observed, 2)}→${fmt(p.sharpe_sensitivity, 2)}, DSR ${fmt(p.dsr_observed, 2)}→${fmt(p.dsr_sensitivity, 2)}.` : ''}`,
     rw_missing_values_reject: (p) => `Refused to judge: ${p.col != null ? `column "${p.col}" has` : 'the return series has'} ${p.n_missing}/${p.n_periods} blank or non-numeric cells (${Math.round((p.rate || 0) * 100)}%). Zero-filling would artificially deflate volatility and distort the verdict — this engine never fills zeros and honestly refuses when ≥5% of cells are missing. Fill in the data or remove the offending column/periods, then retry.`,
     rw_missing_rows_reject: (p) => `Refused to judge: each column is <5% missing, but rows containing gaps total ${p.n_rows_dropped}/${p.n_periods} (${Math.round((p.rate || 0) * 100)}%) — dropping them whole (required to keep the columns aligned) would distort the sample too much. Never zero-filled; fill the gaps and retry.`,
     // 基準配對(R17 必修4)
-    rw_bench_pair_idx_invalid: () => 'Benchmark pairing index invalid (length/range/uniqueness mismatch, or fewer than 2 paired periods): fell back to positional pairing over the common length.',
+    rw_bench_pair_idx_invalid: () => 'Benchmark pairing index invalid (length/range/uniqueness/type mismatch — non-integer, non-numeric or non-iterable — or fewer than 2 paired periods): fell back to positional pairing over the common length.',
     // 偵測下沉層(engine detect_and_convert)
     rw_detect_kind_mismatch: (p) => `Series-type detection disagreed${p.col ? ` on column "${p.col}"` : ''}: the browser hinted "${p.js}" but the engine's authoritative check says "${p.py}". The engine's call (${p.py}) was used for the analysis — eyeball your data to make sure it really is ${p.py === 'nav' ? 'an equity/NAV curve' : 'per-period returns'}.`,
     rw_detect_dates_mismatch: (p) => `Date normalization disagreed on ${p.n_diff} row(s) between the browser and the engine (ROC-calendar / format handling). The engine's (Python) normalization was used.`,
@@ -763,6 +763,7 @@ const STRINGS = {
     rw_dates_sorted: (p) => `Out-of-order dates: ${p.n_moved} row(s) were not in chronological order; they were stably sorted by date to restore the true sequence before testing (sorting restores the truth, it does not alter your data — disclosed here).`,
     rw_dates_len_mismatch: (p) => `The date column length (${p.n_dates}) does not match the number of periods (${p.n_periods}): dates are used only for frequency inference, and row-level integrity checks (duplicates / ordering / synced drops) could not run — check your data.`,
     rw_dates_partially_unparseable: (p) => `Some dates could not be parsed: ${p.n_unparseable} of ${p.n_periods} row(s) carry a date that is not a parseable timestamp (garbage string / blank). Those rows take no part in the duplicate check ("N/A" is not a timestamp — identical garbage strings are no evidence of cloned good days; the check still ran on every parseable row), and the chronological-sort step was SKIPPED for this dataset (no total order exists with unparseable dates present); the annualization frequency falls back honestly via the date channel and is warned about separately.`,
+    rw_date_guard_skipped_unparseable: (p) => `Date-integrity guard NOT executed: the whole date column failed to parse (even after a unified-UTC retry) — the duplicate-timestamp / ordering checks were SKIPPED this run, so row-level integrity is unverified (a skip never counts as a pass); the annualization frequency falls back honestly via the date channel and is warned about separately. Check the date format (for ISO-8601 with timezones, keep the format consistent).`,
     // 輸入通道硬化(R19 必修4)
     rw_invalid_values_type: () => 'Refused: the data contains values that cannot be parsed as numbers (non-numeric strings etc.). Make sure every column is numeric (returns or NAV), then retry.',
     rw_n_trials_invalid: (p) => `n_trials=${p.value} is invalid (must be an integer ≥ 1): fell back to 1 (no deflation). Check the declared value.`,
@@ -1215,12 +1216,16 @@ function splitCSVLine(line, delim) {
   return out;
 }
 
-// 3h-0. 缺值 fail-closed(R17 必修1)—— 空白/非數字格【絕不以 0 填補】。
-// 填 0 會人為壓低波動、抬高夏普(把最差的日子留空即可騙分),與基準對齊卡
-// 「缺日直接略過、不以 0 填補」的倫理一致。規則(與引擎守衛同判準,雙層防禦):
-//   任一欄缺格率 ≥ MISSING_MAX_RATE(5%)→ 拒絕評審(可渲染錯誤卡,說明為何);
-//   <5% → 該期【整列剔除】(矩陣模式整列剔除,保持橫斷面對齊),並以警語揭露剔除數;
-//   矩陣模式含缺格列合計 ≥5% 也拒審(多欄缺格互不重疊會複利吃樣本)。
+// 3h-0. 缺值 fail-closed(R17 必修1;★R21b 改為【直通引擎】★)—— 空白/非數字格
+// 【絕不以 0 填補】。填 0 會人為壓低波動、抬高夏普(把最差的日子留空即可騙分),與基準
+// 對齊卡「缺日直接略過、不以 0 填補」的倫理一致。
+// R21b 前的舊行為(前端 <5% 先整列剔除)會讓引擎永遠看不到 NaN → R21 建的缺值敏感度
+// 試算/警語升級/fail-closed 降級在公開站全是死碼(驗收官 A 抓的 MED)。修後政策:
+//   任一欄缺格率 ≥ MISSING_MAX_RATE(5%)→ 前端快速拒審(fail-fast UX,免載 Pyodide,
+//   訊息與引擎 missing_values_reject 同判準);矩陣含缺格列合計 ≥5% 同樣快速拒審;
+//   <5% → 【保留缺值位】(NaN;JSON.stringify → null)連同日期原樣送引擎,由引擎守衛
+//   (pytest 釘死)整列剔除+缺值敏感度試算+fail-closed 降級;前端僅以 pw_missing_detected
+//   揭露「偵測到缺值、已交引擎誠實處理」,剔除數/敏感度數字以引擎警語為準(不重複、不矛盾)。
 const MISSING_MAX_RATE = 0.05;
 
 // 單欄缺格檢查:缺格率 ≥5% 丟可渲染錯誤(欄名走 escapeHtml——錯誤卡以 innerHTML 呈現)。
@@ -1337,19 +1342,19 @@ function parseCSV(text, srcName) {
     const vals = body.map(r => parseNumberCell(r[0]));
     const good = vals.filter(isNum).length;
     if (good < 2) throw new Error(t('perr_single_num'));
-    // 缺值 fail-closed:≥5% 拒審;<5% 整期剔除並揭露,絕不填 0
+    // 缺值 fail-closed(R21b):≥5% 快速拒審;<5% 【保留缺值位】(NaN→JSON null)
+    // 原樣送引擎,由引擎整列剔除+敏感度試算+降級。前端不再剔列,絕不填 0。
     const colLabel = (header && header[0]) ? header[0] : t('strat_col', 1);
     const nBad = guardMissingColumn(vals, colLabel);
     const parseWarns = [];
-    const clean = vals.filter(isNum);
-    if (nBad) parseWarns.push({ key: 'pw_missing_dropped', args: [colLabel, nBad, vals.length] });
-    const kind = detectSeriesKind(clean);
-    const returns = kind === 'nav' ? navToReturns(clean) : clean;
+    if (nBad) parseWarns.push({ key: 'pw_missing_detected', args: [colLabel, nBad, vals.length] });
+    const kind = detectSeriesKind(vals); // 內部以有限值子集判型(與引擎 _finite_list 同語意),NaN 不影響
+    const returns = kind === 'nav' ? navToReturns(vals) : vals; // navToReturns 對 NaN 傳播(不填 0)
     return {
       mode: 'returns', dates: null, returns, matrix: null, colNames: null,
       srcName, nRows: returns.length,
       noteKey: kind === 'nav' ? 'note_series_nav' : 'note_series_ret',
-      rawValues: clean.slice(), datesRaw: null, jsKind: kind, parseWarns,
+      rawValues: vals.slice(), datesRaw: null, jsKind: kind, parseWarns,
     };
   }
 
@@ -1363,18 +1368,18 @@ function parseCSV(text, srcName) {
     const valsAll = body.map(r => parseNumberCell(r[1]));
     const good = valsAll.filter(isNum).length;
     if (good < 2) throw new Error(t('perr_dv_num'));
-    // 缺值 fail-closed:≥5% 拒審;<5% 該期整列剔除(日期同步剔除),絕不填 0
+    // 缺值 fail-closed(R21b):≥5% 快速拒審;<5% 【保留缺值位】(NaN→JSON null)
+    // 連同日期原樣送引擎,由引擎整列剔除+敏感度試算+降級。前端不再剔列,絕不填 0。
     const colLabel = (header && header[1]) ? header[1] : t('strat_col', 1);
     const nBad = guardMissingColumn(valsAll, colLabel);
     const parseWarns = [];
-    const keepIdx = [];
-    for (let i = 0; i < valsAll.length; i++) if (isNum(valsAll[i])) keepIdx.push(i);
-    if (nBad) parseWarns.push({ key: 'pw_missing_dropped', args: [colLabel, nBad, valsAll.length] });
-    let vals = keepIdx.map(i => valsAll[i]);
-    let dates = keepIdx.map(i => normalizeDate(col0[i]));
-    let datesRaw = keepIdx.map(i => col0[i]);
+    if (nBad) parseWarns.push({ key: 'pw_missing_detected', args: [colLabel, nBad, valsAll.length] });
+    let vals = valsAll.slice();
+    let dates = col0.map(normalizeDate);
+    let datesRaw = col0.slice();
     // R19 必修1:日期完整性(重複 → 拒審/保留首見;亂序 → 穩定排序)——必須在
-    // nav 偵測/轉換之前(轉換依賴正確時序)
+    // nav 偵測/轉換之前(轉換依賴正確時序)。判重只看日期欄:缺值(NaN)列原樣
+    // 同步搬動、不影響重複判定(verify_missing 情境 8 釘住此交互)。
     const di = applyDateIntegrity(dates, [vals, datesRaw], parseWarns);
     dates = di.dates; [vals, datesRaw] = di.arrays;
     const kind = detectSeriesKind(vals);
@@ -1418,36 +1423,33 @@ function parseCSV(text, srcName) {
   }
   if (colsParsed.length < 1) throw new Error(t('perr_cols'));
 
-  // 缺值 fail-closed:逐欄檢查(任一欄 ≥5% → 拒審,帶欄名),再把含缺格的期【整列剔除】
-  // 保持各欄橫斷面對齊;剔除列合計 ≥5% 也拒審。絕不填 0。
+  // 缺值 fail-closed(R21b):逐欄檢查(任一欄 ≥5% → 快速拒審,帶欄名);各欄 <5% 但
+  // 含缺格列合計 ≥5% 也快速拒審(多欄缺格互不重疊會複利吃樣本;與引擎 missing_rows_reject
+  // 同判準)。<5% 【不再前端剔列】——缺值位保留(NaN→JSON null)原樣送引擎,由引擎
+  // 整列剔除(保持橫斷面對齊)+敏感度試算+降級。絕不填 0。
   let anyBad = false;
   for (const col of colsParsed) {
     const nBad = guardMissingColumn(col.vals, col.label);
     if (nBad) {
       anyBad = true;
-      parseWarns.push({ key: 'pw_missing_dropped', args: [col.label, nBad, col.vals.length] });
+      parseWarns.push({ key: 'pw_missing_detected', args: [col.label, nBad, col.vals.length] });
     }
   }
-  let keepIdx = null;
   if (anyBad) {
-    keepIdx = [];
+    let nDrop = 0;
     for (let i = 0; i < body.length; i++) {
-      let ok = true;
-      for (const col of colsParsed) if (!isNum(col.vals[i])) { ok = false; break; }
-      if (ok) keepIdx.push(i);
+      for (const col of colsParsed) if (!isNum(col.vals[i])) { nDrop++; break; }
     }
-    const nDrop = body.length - keepIdx.length;
     if (nDrop / body.length >= MISSING_MAX_RATE) {
       throw new Error(t('perr_missing_rows_reject', nDrop, body.length,
                         Math.round((nDrop / body.length) * 100)));
     }
-    parseWarns.push({ key: 'pw_missing_rows', args: [nDrop, body.length] });
   }
-  const pick = (vals) => keepIdx ? keepIdx.map(i => vals[i]) : vals;
-  let dates = hasDateCol ? pick(col0).map(normalizeDate) : null;
-  let datesRawKept = hasDateCol ? pick(col0).slice() : null;
-  // R19 必修1:日期完整性(所有欄與日期整列同步剔除/重排,在 nav 偵測/轉換之前)
-  let colVals = colsParsed.map(col => pick(col.vals));
+  let dates = hasDateCol ? col0.map(normalizeDate) : null;
+  let datesRawKept = hasDateCol ? col0.slice() : null;
+  // R19 必修1:日期完整性(所有欄與日期整列同步剔除/重排,在 nav 偵測/轉換之前;
+  // 判重只看日期欄,缺值(NaN)列原樣同步搬動、不影響重複判定)
+  let colVals = colsParsed.map(col => col.vals);
   if (dates) {
     const di = applyDateIntegrity(dates, [...colVals, datesRawKept], parseWarns);
     dates = di.dates;
@@ -1581,6 +1583,10 @@ async function runAnalysis() {
     // 記住原始 key/args,切語言時重繪 warnings 用
     State.lastBenchNoteKey = benchNoteKey;
     State.lastBenchNoteArgs = benchNoteArgs || [];
+    // R20 必修5:基準線要畫在【對應的策略期座標】上——記住配對索引與送引擎的策略長度
+    // (引擎若剔列,equity_curve 長度會 < userLen,此時 idx 座標失效 → 繪圖端自動退回舊行為)
+    State.lastBenchIdx = benchArr ? (benchIdx || null) : null;
+    State.lastUserLen = userLen;
     // 硬化揭露:記住使用者「申報」的 n_trials,渲染時與引擎回的有效 n_trials 比對
     State.lastDeclaredNTrials = nTrials;
 
@@ -1924,7 +1930,8 @@ function renderResults(out, parsed, benchNote) {
   renderGates(out);
 
   // ---- 圖表 ----
-  drawEquityChart(out.equity_curve, out.benchmark_curve, parsed);
+  // R20 必修5:基準覆蓋 <100% 時,基準線要畫在對應的策略期座標(State.lastBenchIdx)
+  drawEquityChart(out.equity_curve, out.benchmark_curve, parsed, State.lastBenchIdx);
   drawNullChart(out.permutation_null);
 }
 
@@ -2169,11 +2176,13 @@ const SVGNS = 'http://www.w3.org/2000/svg';
 // 長序列(日內 1 分 K 等,>50k 期)抽稀:單條 SVG path 塞 50 萬點會拖垮瀏覽器。
 // 分桶保 min/max(桶內先出現者在前)→ 回撤尖點不會被抽稀抹掉;首末點原樣保留。
 // 只影響「畫」,統計全部在引擎端用完整序列算完才回來。
-function decimateSeries(arr, maxPts = 2400) {
+function decimateKeepPositions(arr, maxPts = 2400) {
+  // 回傳「保留哪些原始位置」(遞增);n <= maxPts → null(全保留)。
+  // R20 必修5:抽稀改回位置而非值——(期座標, 值) 才能【成對】抽,基準線不會抽完錯位。
   const n = arr.length;
-  if (n <= maxPts) return arr;
+  if (n <= maxPts) return null;
   const buckets = Math.floor(maxPts / 2) - 1;
-  const out = [arr[0]];
+  const keep = [0];
   const step = (n - 2) / buckets;
   for (let b = 0; b < buckets; b++) {
     const s = 1 + Math.floor(b * step);
@@ -2185,14 +2194,19 @@ function decimateSeries(arr, maxPts = 2400) {
       if (arr[i] > arr[ma]) ma = i;
     }
     const first = Math.min(mi, ma), second = Math.max(mi, ma);
-    out.push(arr[first]);
-    if (second !== first) out.push(arr[second]);
+    keep.push(first);
+    if (second !== first) keep.push(second);
   }
-  out.push(arr[n - 1]);
-  return out;
+  keep.push(n - 1);
+  return keep;
 }
 
-function drawEquityChart(equity, bench, parsed) {
+function decimateSeries(arr, maxPts = 2400) {
+  const keep = decimateKeepPositions(arr, maxPts);
+  return keep ? keep.map(p => arr[p]) : arr;
+}
+
+function drawEquityChart(equity, bench, parsed, benchIdx) {
   const host = $('equityChart');
   host.innerHTML = '';
   if (!equity || equity.length < 2) {
@@ -2202,8 +2216,27 @@ function drawEquityChart(equity, bench, parsed) {
   }
   // 抽稀防呆(日內長序列);srcN 記原始期數,x 軸末標籤才對得上真正的最後一期。
   const srcN = equity.length;
-  equity = decimateSeries(equity);
-  if (bench && bench.length >= 2) bench = decimateSeries(bench);
+  // ---- R20 必修5:基準線畫在【對應的策略期座標】上 ----
+  // 修前:X 以 equity 長度建座標、bench 第 i 點直接畫在 X(i) → 基準覆蓋 <100% 時
+  // 基準線視覺左壓、提前終止(數字卡皆正確,純圖表刀)。修後:alignBenchmark 回傳的
+  // idx(交集日在策略序列中的索引,與 bench 逐位對應)就是每個基準點的正確期座標。
+  // 座標有效性防呆:引擎剔列會讓 equity_curve 變短(srcN < 送引擎的策略長度),此時
+  // idx 座標系失效 → 退回舊位置行為(視覺層 fail-safe);idx=null(無日期等長配對)
+  // 位置座標本來就對齊,維持現行為。
+  const useIdx = Array.isArray(benchIdx) && bench && benchIdx.length === bench.length
+    && (State.lastUserLen == null || State.lastUserLen === srcN)
+    && benchIdx.every(v => Number.isInteger(v) && v >= 0 && v < srcN);
+  // 抽稀:一律「(期座標, 值) 成對」——先算保留位置,再同步映射值與期座標。
+  const eqKeep = decimateKeepPositions(equity);
+  const eqPer = eqKeep || null;                       // 策略各繪點的期座標(null=恆等)
+  if (eqKeep) equity = eqKeep.map(p => equity[p]);
+  let benchPer = null;                                // 基準各繪點的期座標
+  if (bench && bench.length >= 2) {
+    const bKeep = decimateKeepPositions(bench);
+    const perOf = (p) => (useIdx ? benchIdx[p] : p);
+    benchPer = (bKeep || Array.from({ length: bench.length }, (_, i) => i)).map(perOf);
+    if (bKeep) bench = bKeep.map(p => bench[p]);
+  }
 
   const W = 640, H = 300, padL = 46, padR = 16, padT = 16, padB = 28;
   const iw = W - padL - padR, ih = H - padT - padB;
@@ -2219,8 +2252,11 @@ function drawEquityChart(equity, bench, parsed) {
   vmin -= pad; vmax += pad;
 
   const n = equity.length;
-  const X = (i) => padL + (i / (n - 1)) * iw;
+  // X 吃【期座標】(0..srcN-1):未抽稀時策略點期座標=繪點序=舊行為逐位相同;
+  // 抽稀時策略/基準都以原始期座標落點(修掉抽稀後座標非均勻的舊失真)。
+  const X = (i) => padL + (i / (srcN - 1)) * iw;
   const Y = (v) => padT + (1 - (v - vmin) / (vmax - vmin)) * ih;
+  const eqX = (i) => X(eqPer ? eqPer[i] : i);
 
   const svg = document.createElementNS(SVGNS, 'svg');
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
@@ -2248,19 +2284,19 @@ function drawEquityChart(equity, bench, parsed) {
   }
 
   // 面積(策略)
-  let areaD = `M ${X(0)} ${Y(equity[0])}`;
-  for (let i = 1; i < n; i++) areaD += ` L ${X(i)} ${Y(equity[i])}`;
-  areaD += ` L ${X(n - 1)} ${Y(vmin)} L ${X(0)} ${Y(vmin)} Z`;
+  let areaD = `M ${eqX(0)} ${Y(equity[0])}`;
+  for (let i = 1; i < n; i++) areaD += ` L ${eqX(i)} ${Y(equity[i])}`;
+  areaD += ` L ${eqX(n - 1)} ${Y(vmin)} L ${eqX(0)} ${Y(vmin)} Z`;
   const area = document.createElementNS(SVGNS, 'path');
   area.setAttribute('d', areaD); area.setAttribute('class', 'eq-area');
   svg.appendChild(area);
 
-  // 基準線
-  if (hasBench) svg.appendChild(mkPath(bench, X, Y, 'eq-bench'));
+  // 基準線(R20 必修5:第 k 點畫在 X(benchPer[k]) = 對應的策略期座標)
+  if (hasBench) svg.appendChild(mkPath(bench, X, Y, 'eq-bench', benchPer));
   // 策略線
-  svg.appendChild(mkPath(equity, X, Y, 'eq-strat'));
+  svg.appendChild(mkPath(equity, X, Y, 'eq-strat', eqPer));
   // 策略末端發光點:視線落點,強調期末淨值
-  const ex = X(n - 1), ey = Y(equity[n - 1]);
+  const ex = eqX(n - 1), ey = Y(equity[n - 1]);
   const halo = document.createElementNS(SVGNS, 'circle');
   halo.setAttribute('cx', ex); halo.setAttribute('cy', ey); halo.setAttribute('r', 6);
   halo.setAttribute('class', 'eq-end-halo');
@@ -2458,9 +2494,12 @@ function mkText(x, y, txt, cls, anchor) {
   t.textContent = txt;
   return t;
 }
-function mkPath(arr, X, Y, cls) {
-  let d = `M ${X(0)} ${Y(arr[0])}`;
-  for (let i = 1; i < arr.length; i++) d += ` L ${X(i)} ${Y(arr[i])}`;
+function mkPath(arr, X, Y, cls, periods) {
+  // periods(可選):各點的期座標陣列(與 arr 逐位對應)——R20 必修5,基準線/抽稀後
+  // 的線畫在真實期座標上;省略時維持舊行為(第 i 點畫在 X(i))。
+  const px = (i) => X(periods ? periods[i] : i);
+  let d = `M ${px(0)} ${Y(arr[0])}`;
+  for (let i = 1; i < arr.length; i++) d += ` L ${px(i)} ${Y(arr[i])}`;
   const p = document.createElementNS(SVGNS, 'path');
   p.setAttribute('d', d); p.setAttribute('class', cls);
   return p;
