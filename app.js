@@ -208,6 +208,14 @@ const STRINGS = {
     pw_missing_dropped: (col, nBad, nTotal) => `缺值處理:欄「${col}」有 ${nBad}/${nTotal} 格空白或非數字,該期已【整列剔除】——絕不以 0 填補(填 0 會人為壓低波動、抬高夏普)。`,
     pw_missing_rows: (nDrop, nTotal) => `缺值處理:含缺格的 ${nDrop}/${nTotal} 列已整列剔除(保持各欄橫斷面對齊),統計檢定在剔除後的資料上執行。`,
     pw_empty_col_dropped: (i) => `第 ${i} 欄無標題且全欄無數字(常見於行尾多餘逗號),已忽略該欄。`,
+    // —— 日期完整性 fail-closed(R19)——
+    perr_dup_dates_reject: (nDup, nTotal, pct) => `日期重複拒審:${nDup}/${nTotal} 列(${pct}%)的時間戳記與先前列完全相同。`
+      + '重複列會把「好日子」複製灌水、人為抬高夏普與判分——本工具不靜默去重放行,重複率 ≥5% 時誠實拒絕評審。'
+      + '請檢查資料(常見成因:pandas concat 產生重複列);若為日內資料,請提供含時間的完整時間戳記(只給日期會使同日多根 bar 撞成重複)。',
+    pw_dup_dates_dropped: (nDup, nTotal) => `日期重複處理:${nDup}/${nTotal} 列的時間戳記與先前列完全相同(<5%),已【保留首見、整列剔除重複列】——重複列會複製好日子灌水判分,絕不靜默保留。`,
+    pw_dates_sorted: (nMoved) => `日期亂序處理:${nMoved} 列不在時間順序上,已依日期【穩定排序】恢復真實時序後再檢定(排序是恢復真相、不是竄改資料——照實揭露)。`,
+    pw_dates_partial_unparseable: (nBad) => `日期部分無法解析:${nBad} 列的日期不是可解析的時間戳記(空白/"N/A" 等)。該些列不參與重複判定(N/A 不是時戳,相同的垃圾字串不構成「複製好日子」證據——可解析列的重複判定照常),且已【略過時序排序檢查】(含不可解析日期無法建立完整時序);年化頻率由引擎誠實回退並另行告警。`,
+    pw_dup_colname: (base, renamed) => `欄名重複:「${base}」出現多次,後者已改名為「${renamed}」保留(否則後欄會靜默覆蓋前欄)。請確認兩欄是否本就是不同策略。`,
 
     // —— 圖表 empty / 標籤 / legend ——
     equity_empty: '資料太少,無法繪製資金曲線。<br><span>至少需要兩期報酬。</span>',
@@ -520,6 +528,14 @@ const STRINGS = {
     pw_missing_dropped: (col, nBad, nTotal) => `Missing values: column "${col}" has ${nBad}/${nTotal} blank or non-numeric cells; those periods were DROPPED whole — never zero-filled (zero-filling artificially deflates volatility and inflates the Sharpe).`,
     pw_missing_rows: (nDrop, nTotal) => `Missing values: ${nDrop}/${nTotal} rows containing gaps were dropped whole (keeping the columns cross-sectionally aligned); all tests run on the cleaned data.`,
     pw_empty_col_dropped: (i) => `Column ${i} has no header and no numbers at all (usually a trailing comma); it was ignored.`,
+    // —— date integrity fail-closed (R19) ——
+    perr_dup_dates_reject: (nDup, nTotal, pct) => `Refused: duplicate dates. ${nDup}/${nTotal} rows (${pct}%) carry a timestamp identical to an earlier row. `
+      + 'Duplicated rows clone the "good days" and artificially inflate the Sharpe and the verdict — this tool never silently dedups and waves it through; it honestly refuses when ≥5% of rows are duplicates. '
+      + 'Check your data (a stray pandas concat is the usual culprit); for intraday data, provide full timestamps with a time component (date-only rows make every bar of the same day collide).',
+    pw_dup_dates_dropped: (nDup, nTotal) => `Duplicate dates: ${nDup}/${nTotal} rows carry a timestamp identical to an earlier row (<5%); the FIRST occurrence was kept and the duplicate rows were dropped whole — duplicates clone good days and inflate the verdict, so they are never silently kept.`,
+    pw_dates_sorted: (nMoved) => `Out-of-order dates: ${nMoved} rows were not in chronological order; they were stably sorted by date to restore the true sequence before testing (sorting restores the truth — it does not alter your data — and is disclosed here).`,
+    pw_dates_partial_unparseable: (nBad) => `Some dates could not be parsed: ${nBad} row(s) carry a date that is not a parseable timestamp (blank / "N/A" etc.). Those rows take no part in the duplicate check ("N/A" is not a timestamp — identical garbage strings are no evidence of cloned good days; the check still runs on every parseable row), and the chronological-sort step was SKIPPED (no total order exists with unparseable dates present); the annualization frequency falls back honestly and is warned about separately by the engine.`,
+    pw_dup_colname: (base, renamed) => `Duplicate column name: "${base}" appears more than once; the later one was renamed "${renamed}" and kept (otherwise it would silently overwrite the earlier column). Check whether they really are different strategies.`,
 
     // —— chart empty / labels / legend ——
     equity_empty: 'Too little data to draw the capital curve.<br><span>At least two periods of returns are needed.</span>',
@@ -671,15 +687,21 @@ const STRINGS = {
     // reasons(rc_)
     // var_proxy=true(引擎:單序列宣稱 n_trials>1、無真試驗池 → 以 SR 標準誤作試驗離散度
     // 下限保守通縮)時,EN 文案照實渲染 proxy 語意,與引擎 zh 字串 1:1 同義。
+    // R19 必修5c:n_trials=1 無多重檢定可扣 —— "correcting for the multiple testing of
+    // 1 parameter trials" 是機翻感的假話(沒有通縮發生),走專用模板。
     rc_dsr_high_confidence: (p) => p.var_proxy
       ? `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: a single series carries no true trial pool, so the Sharpe-ratio standard error is used as a conservative lower bound on trial dispersion to genuinely deflate for "${p.n_trials} parameter sets tried" — and the probability of a real edge still stays high (dispersion is a conservative proxy, not a true trial pool).`
-      : `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: even after correcting for the multiple testing of ${p.n_trials} parameter trials, the probability of a real edge stays high.`,
+      : (p.n_trials === 1
+        ? `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: with no parameter search declared (n_trials=1), no multiple-testing deflation applies; judged as a single curve, the probability of a real edge is high.`
+        : `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: even after correcting for the multiple testing of ${p.n_trials} parameter trials, the probability of a real edge stays high.`),
     rc_dsr_above_noise_floor: (p) => p.var_proxy
       ? `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: after a conservative deflation using the Sharpe-ratio standard error as the trial dispersion (single series, no true trial pool, trials=${p.n_trials}), it clears the 0.60 noise floor — but confidence is not top-tier; don't treat it as ironclad.`
       : `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)}: above the 0.60 noise floor, but confidence is not top-tier — don't treat it as ironclad.`,
     rc_dsr_below_noise_floor: (p) => p.var_proxy
       ? `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)} < 0.60: after deflating the luck of "${p.n_trials} parameter sets tried" with the Sharpe-ratio standard error as trial dispersion, the odds of a real edge are under half — highly likely noise.`
-      : `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)} < 0.60: after the multiple-testing correction, the odds of a real edge are under half — highly likely noise.`,
+      : (p.n_trials === 1
+        ? `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)} < 0.60: even with no parameter search declared (n_trials=1, so no multiple-testing deflation), the odds of a real edge are under half — highly likely noise.`
+        : `Deflated Sharpe (DSR)=${fmt(p.dsr, 2)} < 0.60: after the multiple-testing correction, the odds of a real edge are under half — highly likely noise.`),
     rc_dsr_not_computable: () => 'DSR could not be computed (insufficient sample or variance); excluded from the verdict.',
     rc_capped_escape_fail_closed: (p) => `Noise-hardening scaled the trial count to its cap (${p.n_trials}) and the Deflated Sharpe still hasn't dropped below the 0.60 noise floor — this usually means too many columns / too short a sample, so this in-sample winner is statistically indistinguishable from one lucky draw of noise. The engine fails closed: overfitting cannot be ruled out, so it is not called real.`,
     rc_pbo_high: (p) => `Probability of backtest overfitting (PBO)=${fmt(p.pbo, 2)} > 0.50: the in-sample best pick usually lands near the bottom out-of-sample — a classic overfitting signature.`,
@@ -731,10 +753,33 @@ const STRINGS = {
     rw_missing_values_reject: (p) => `Refused to judge: ${p.col != null ? `column "${p.col}" has` : 'the return series has'} ${p.n_missing}/${p.n_periods} blank or non-numeric cells (${Math.round((p.rate || 0) * 100)}%). Zero-filling would artificially deflate volatility and distort the verdict — this engine never fills zeros and honestly refuses when ≥5% of cells are missing. Fill in the data or remove the offending column/periods, then retry.`,
     rw_missing_rows_reject: (p) => `Refused to judge: each column is <5% missing, but rows containing gaps total ${p.n_rows_dropped}/${p.n_periods} (${Math.round((p.rate || 0) * 100)}%) — dropping them whole (required to keep the columns aligned) would distort the sample too much. Never zero-filled; fill the gaps and retry.`,
     // 基準配對(R17 必修4)
-    rw_bench_pair_idx_invalid: () => 'Benchmark pairing index invalid (length/range mismatch, or fewer than 2 paired periods): fell back to positional pairing over the common length.',
+    rw_bench_pair_idx_invalid: () => 'Benchmark pairing index invalid (length/range/uniqueness mismatch, or fewer than 2 paired periods): fell back to positional pairing over the common length.',
     // 偵測下沉層(engine detect_and_convert)
     rw_detect_kind_mismatch: (p) => `Series-type detection disagreed${p.col ? ` on column "${p.col}"` : ''}: the browser hinted "${p.js}" but the engine's authoritative check says "${p.py}". The engine's call (${p.py}) was used for the analysis — eyeball your data to make sure it really is ${p.py === 'nav' ? 'an equity/NAV curve' : 'per-period returns'}.`,
     rw_detect_dates_mismatch: (p) => `Date normalization disagreed on ${p.n_diff} row(s) between the browser and the engine (ROC-calendar / format handling). The engine's (Python) normalization was used.`,
+    // 日期完整性(R19 必修1,引擎守衛層)
+    rw_duplicate_dates_reject: (p) => `Refused: duplicate dates. ${p.n_dup}/${p.n_periods} periods (${Math.round((p.rate || 0) * 100)}%) carry a timestamp identical to an earlier row. Duplicated rows clone the "good days" and artificially inflate the Sharpe and the verdict — this engine never silently dedups and waves it through; it honestly refuses when ≥5% of rows are duplicates. Check your data (a stray pandas concat is the usual culprit); for intraday data, provide full timestamps with a time component.`,
+    rw_duplicate_dates_dropped: (p) => `Duplicate dates: ${p.n_dup} row(s) carried a timestamp identical to an earlier row (<5%); the FIRST occurrence was kept and the duplicates dropped whole (duplicates clone good days and inflate the verdict — never silently kept); ${p.n_kept} valid periods remain.`,
+    rw_dates_sorted: (p) => `Out-of-order dates: ${p.n_moved} row(s) were not in chronological order; they were stably sorted by date to restore the true sequence before testing (sorting restores the truth, it does not alter your data — disclosed here).`,
+    rw_dates_len_mismatch: (p) => `The date column length (${p.n_dates}) does not match the number of periods (${p.n_periods}): dates are used only for frequency inference, and row-level integrity checks (duplicates / ordering / synced drops) could not run — check your data.`,
+    rw_dates_partially_unparseable: (p) => `Some dates could not be parsed: ${p.n_unparseable} of ${p.n_periods} row(s) carry a date that is not a parseable timestamp (garbage string / blank). Those rows take no part in the duplicate check ("N/A" is not a timestamp — identical garbage strings are no evidence of cloned good days; the check still ran on every parseable row), and the chronological-sort step was SKIPPED for this dataset (no total order exists with unparseable dates present); the annualization frequency falls back honestly via the date channel and is warned about separately.`,
+    // 輸入通道硬化(R19 必修4)
+    rw_invalid_values_type: () => 'Refused: the data contains values that cannot be parsed as numbers (non-numeric strings etc.). Make sure every column is numeric (returns or NAV), then retry.',
+    rw_n_trials_invalid: (p) => `n_trials=${p.value} is invalid (must be an integer ≥ 1): fell back to 1 (no deflation). Check the declared value.`,
+    rw_ppy_invalid: (p) => `periods_per_year=${p.value} is invalid (must be a positive finite number): it was ignored; the frequency is inferred from dates instead (252 if no dates).`,
+    rw_extreme_returns: (p) => `Abnormal return magnitude: ${p.n} period(s) with |return| ≥ 10 (=1,000%). The usual cause is percentages entered as decimals (5% typed as 5.0) or a unit error — every annualized figure and the verdict would be badly distorted; confirm the unit (decimal: 0.05 = 5%) before reading this ruling.`,
+    // 基準端 fail-open 收口(R19 必修3)
+    rw_fwer_bench_nonfinite_fallback_zero: (p) => `The SPA / Romano–Wolf benchmark has ${p.n_nonfinite}/${p.n_periods} non-finite periods (NaN/inf, ${Math.round((1 - (p.coverage || 0)) * 100)}%): zero-filling would dilute the benchmark and make "beats the benchmark" too easy — this engine never fills zeros, so these tests honestly degraded to comparing absolute returns (zero benchmark). Do not read "survivors" as "beat the benchmark."`,
+    rw_fwer_bench_nonfinite_rows_dropped: (p) => `The SPA / Romano–Wolf benchmark has ${p.n_dropped} non-finite period(s) (NaN/inf, <5%): those rows were DROPPED from the FWER tests (matrix and benchmark in sync, never zero-filled); FWER ran on ${p.n_used} periods — a different sample size than the main verdict, disclosed here.`,
+    rw_bench_pairs_dropped_nonfinite: (p) => `Benchmark comparison: ${p.n_dropped} paired period(s) had a non-finite benchmark value (NaN/inf) and were dropped pairwise (never zero-filled — zero-filling dilutes the benchmark); ${p.n_paired} pairs actually used, as disclosed.`,
+    rw_bench_pair_too_few: (p) => `After syncing the benchmark pairing index with the dropped rows, fewer than 2 pairs remain: the paired sample is too small, so the benchmark comparison was SKIPPED this time (no fallback to positional pairing — that fallback cannot guarantee period-by-period correspondence here).`,
+    rw_bench_invalid_type: () => 'The benchmark series contains values that cannot be parsed as numbers: all benchmark-related tests were skipped this time (a skip never counts as a pass).',
+    // turnover / 成本端 fail-open 收口(R19 必修3)
+    rw_turnover_invalid_type: () => 'The turnover series contains values that cannot be parsed as numbers: the cost stress test was skipped this time (a skip never counts as a pass).',
+    rw_turnover_len_mismatch: (p) => `Turnover length (${p.turnover_len}) does not match the number of return periods (${p.n_periods}): costs were computed on a rough "truncate both to the common length" pairing (disclosed — check that both series cover the same window).`,
+    rw_turnover_nonfinite_skipped: (p) => `Turnover has ${p.n_nonfinite}/${p.n_periods} periods (${Math.round((p.rate || 0) * 100)}%) that are non-finite (NaN/inf) or negative: zero-filling would UNDERSTATE costs, and negative turnover would even pay you a subsidy — this engine never fills zeros; with ≥5% invalid the cost stress test is SKIPPED (a skip never counts as a pass). Fill in the turnover and retry.`,
+    rw_turnover_nonfinite_dropped: (p) => `Turnover has ${p.n_dropped} period(s) that are non-finite (NaN/inf) or negative (<5%): those periods were DROPPED from the cost computation (never zero-filled — that would understate costs — and negative turnover never gets to subsidize); the cost gate ran on ${p.n_used} periods.`,
+    rw_cost_bps_invalid: (p) => `cost_bps_per_turnover=${p.value} is invalid (must be a non-negative finite number): the cost stress test was skipped this time (a skip never counts as a pass).`,
   },
 };
 
@@ -1095,11 +1140,14 @@ function normalizeDate(s) {
 }
 
 // 3e. 淨值序列 → 報酬序列(偵測後轉換)
+//     R19 必修5b(與引擎 nav_to_returns 同語意):前值為 0 或非有限 → 該期報酬【NaN】,
+//     不再記 0(記 0 = 憑空捏造「持平日」稀釋波動);NaN 交引擎缺值守衛剔除/拒審。
 function navToReturns(vals) {
   const r = [0];
   for (let i = 1; i < vals.length; i++) {
     const prev = vals[i - 1];
-    r.push(prev !== 0 && isFinite(prev) ? vals[i] / prev - 1 : 0);
+    const cur = vals[i];
+    r.push(isFinite(prev) && isFinite(cur) && prev !== 0 ? cur / prev - 1 : NaN);
   }
   return r;
 }
@@ -1128,14 +1176,43 @@ function detectSeriesKind(vals) {
   return 'returns';
 }
 
-// 3g. 分隔符偵測
+// 3g. 分隔符偵測(R19 必修5a:引號包裹欄位內的分隔符不算——"1,234.56" 的逗號是千分位)
 function detectDelim(line) {
-  const counts = { ',': (line.match(/,/g) || []).length,
-                   '\t': (line.match(/\t/g) || []).length,
-                   ';': (line.match(/;/g) || []).length };
+  const bare = line.replace(/"(?:[^"]|"")*("|$)/g, '""'); // 引號段整段抽掉再數
+  const counts = { ',': (bare.match(/,/g) || []).length,
+                   '\t': (bare.match(/\t/g) || []).length,
+                   ';': (bare.match(/;/g) || []).length };
   let best = ',', n = -1;
   for (const [d, c] of Object.entries(counts)) if (c > n) { n = c; best = d; }
   return n > 0 ? best : ',';
+}
+
+// 3g-2. RFC4180 引號感知切割(R19 必修5a):Excel/券商匯出的 "1,234.56" 是引號包裹的
+//       千分位欄位——舊版裸 split(',') 會把它撕成兩欄、整檔誤判缺值拒審且錯誤訊息誤導
+//       (「空白或非數字」)。規則:引號僅在【欄位開頭】開啟;欄內 "" 跳脫為一個引號;
+//       引號段內的分隔符為字面值。不支援引號內換行(逐行解析前提,README 如實聲明)。
+function splitCSVLine(line, delim) {
+  const out = [];
+  let cur = '';
+  let inQ = false;
+  let started = false; // 目前欄位是否已有內容(引號只在欄位開頭有效)
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else inQ = false;
+      } else cur += ch;
+    } else if (ch === '"' && !started) {
+      inQ = true; started = true;
+    } else if (ch === delim) {
+      out.push(cur); cur = ''; started = false;
+    } else {
+      cur += ch; started = true;
+    }
+  }
+  out.push(cur);
+  return out;
 }
 
 // 3h-0. 缺值 fail-closed(R17 必修1)—— 空白/非數字格【絕不以 0 填補】。
@@ -1160,6 +1237,77 @@ function guardMissingColumn(vals, colLabel) {
   return bad;
 }
 
+// 3h-1. 日期完整性(R19 必修1)—— 與引擎 _date_integrity_guard 同判準的第一層防禦。
+// 實證騙局:把最好的 60 天整列複製 4 份、按日期排序上傳 → 重複列把「好日子」灌水,
+// 年化夏普 -0.72 的真虧策略可判 86 分 likely-real。pandas concat 不慎重複列同樣中招。
+// 政策(門檻與缺值守衛同 5%;R19b 與引擎完全同政策):
+//   完全相同的時間戳記重複率 ≥5% → 拒審(perr_dup_dates_reject,訊息講清楚為什麼);
+//   <5% → 保留首見、重複列整列剔除+揭露(pw_dup_dates_dropped);
+//   唯一但非遞增 → 依日期穩定排序恢復真實時序+揭露(pw_dates_sorted);
+//   解析不了的日期(dateSortKey=null)【不進重複判定、不觸發拒審】——N/A 不是時戳,
+//   相同的垃圾字串不構成「複製好日子」證據(修 R19 誤殺:值全有效+幾列 "N/A" 日期
+//   曾被當重複時戳整檔拒審);可解析列的重複判定照常(分母=全列數);
+//   任一垃圾在場 → 略過排序步(無法建立全序)+揭露(pw_dates_partial_unparseable);
+//   全垃圾 → 行為等同無日期(引擎 ppy_fallback 承擔告警)。
+// 唯一性用【正規化後的完整時間戳排序鍵】:含時間的日內資料各 bar 不撞、不誤傷;
+// date-only 的日內資料會撞同一天 → 拒審訊息提示補完整時間戳。
+
+// 正規化日期(normalizeDate 產物)→ 可字典序比較的排序鍵;解析不了回 null(不進重複
+// 判定、跳過排序檢查,交引擎 ppy_fallback 告警)。時間部分的「時」可能只有 1 位(9:30)→ 補零。
+function dateSortKey(iso) {
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!m) return null;
+  return m[1] + m[2] + m[3] + String(m[4] || '0').padStart(2, '0') + (m[5] || '00') + (m[6] || '00');
+}
+
+// dates=正規化日期;arrays=與 dates 等長的並行陣列們(值欄、原始日期字串…),整列同步
+// 剔除/重排。回 { dates, arrays };≥5% 重複時丟可渲染錯誤。
+function applyDateIntegrity(dates, arrays, parseWarns) {
+  if (!dates || dates.length < 2) return { dates, arrays };
+  // R19b:重複判定改用【解析後的排序鍵】,垃圾日期(key=null)不參與判重、不觸發拒審
+  // ——identical 垃圾字串不是「同一時戳」的證據;可解析列照常判重(分母=全列數)。
+  let keys = dates.map(dateSortKey);
+  let nBad = 0;
+  for (let i = 0; i < keys.length; i++) if (keys[i] === null) nBad++;
+  if (nBad === dates.length) return { dates, arrays }; // 全垃圾 = 等同無日期(不給新能力)
+  const seen = new Set();
+  const keep = [];
+  let nDup = 0;
+  for (let i = 0; i < dates.length; i++) {
+    if (keys[i] === null) { keep.push(i); continue; }  // 垃圾列保留、不進判重
+    if (seen.has(keys[i])) nDup++;
+    else { seen.add(keys[i]); keep.push(i); }
+  }
+  if (nDup && nDup / dates.length >= MISSING_MAX_RATE) {
+    throw new Error(t('perr_dup_dates_reject', nDup, dates.length,
+                      Math.round((nDup / dates.length) * 100)));
+  }
+  if (nDup) {
+    dates = keep.map(i => dates[i]);
+    keys = keep.map(i => keys[i]);
+    arrays = arrays.map(a => (a ? keep.map(i => a[i]) : a));
+    parseWarns.push({ key: 'pw_dup_dates_dropped', args: [nDup, nDup + dates.length] });
+  }
+  // 任一垃圾在場 → 無法建立全序 → 略過排序步+誠實揭露(與引擎同政策)
+  if (nBad) {
+    parseWarns.push({ key: 'pw_dates_partial_unparseable', args: [nBad] });
+    return { dates, arrays };
+  }
+  // 亂序檢查(全可解析且去重後唯一):非遞增 → 穩定排序恢復時序
+  let sorted = true;
+  for (let i = 1; i < keys.length; i++) if (keys[i] < keys[i - 1]) { sorted = false; break; }
+  if (!sorted) {
+    const order = keys.map((k, i) => i);
+    order.sort((a, b) => (keys[a] < keys[b] ? -1 : keys[a] > keys[b] ? 1 : a - b));
+    let nMoved = 0;
+    for (let i = 0; i < order.length; i++) if (order[i] !== i) nMoved++;
+    dates = order.map(i => dates[i]);
+    arrays = arrays.map(a => (a ? order.map(i => a[i]) : a));
+    parseWarns.push({ key: 'pw_dates_sorted', args: [nMoved] });
+  }
+  return { dates, arrays };
+}
+
 // 3h. 主解析:回傳統一結構或丟出可讀錯誤
 function parseCSV(text, srcName) {
   // 去 BOM、統一換行、拆行
@@ -1168,7 +1316,8 @@ function parseCSV(text, srcName) {
   if (rawLines.length < 2) throw new Error(t('perr_too_few'));
 
   const delim = detectDelim(rawLines[0]);
-  const rows = rawLines.map(l => l.split(delim).map(c => c.trim()));
+  // R19 必修5a:引號感知切割——"1,234.56"(Excel/券商千分位)不再被撕成兩欄
+  const rows = rawLines.map(l => splitCSVLine(l, delim).map(c => c.trim()));
 
   // 標題偵測:第一列若無任何可解析數字,視為標題
   const firstNumericCount = rows[0].filter(c => isNum(parseNumberCell(c))).length;
@@ -1221,15 +1370,20 @@ function parseCSV(text, srcName) {
     const keepIdx = [];
     for (let i = 0; i < valsAll.length; i++) if (isNum(valsAll[i])) keepIdx.push(i);
     if (nBad) parseWarns.push({ key: 'pw_missing_dropped', args: [colLabel, nBad, valsAll.length] });
-    const vals = keepIdx.map(i => valsAll[i]);
-    const dates = keepIdx.map(i => normalizeDate(col0[i]));
+    let vals = keepIdx.map(i => valsAll[i]);
+    let dates = keepIdx.map(i => normalizeDate(col0[i]));
+    let datesRaw = keepIdx.map(i => col0[i]);
+    // R19 必修1:日期完整性(重複 → 拒審/保留首見;亂序 → 穩定排序)——必須在
+    // nav 偵測/轉換之前(轉換依賴正確時序)
+    const di = applyDateIntegrity(dates, [vals, datesRaw], parseWarns);
+    dates = di.dates; [vals, datesRaw] = di.arrays;
     const kind = detectSeriesKind(vals);
     const returns = kind === 'nav' ? navToReturns(vals) : vals;
     return {
       mode: 'returns', dates, returns, matrix: null, colNames: null,
       srcName, nRows: returns.length,
       noteKey: kind === 'nav' ? 'note_dv_nav' : 'note_dv_ret',
-      rawValues: vals.slice(), datesRaw: keepIdx.map(i => col0[i]), jsKind: kind, parseWarns,
+      rawValues: vals.slice(), datesRaw, jsKind: kind, parseWarns,
     };
   }
 
@@ -1242,14 +1396,24 @@ function parseCSV(text, srcName) {
   // 常見產物)剔除欄並告警;有標題名但全空的欄則走缺值拒審,不靜默。
   const parseWarns = [];
   const colsParsed = [];
+  const usedLabels = new Set();
   for (let c = startCol; c < nCols; c++) {
-    const label = (header && header[c]) ? header[c] : t('strat_col', c - startCol + 1);
+    let label = (header && header[c]) ? header[c] : t('strat_col', c - startCol + 1);
     const vals = body.map(r => parseNumberCell(r[c]));
     const blankHeader = !(header && header[c] != null && String(header[c]).trim());
     if (blankHeader && !vals.some(isNum)) {
       parseWarns.push({ key: 'pw_empty_col_dropped', args: [c + 1] });
       continue;
     }
+    // R19 必修4:欄名重複會讓後欄【靜默覆蓋】前欄(matrix 以欄名為鍵)→ 改名保留+揭露
+    if (usedLabels.has(label)) {
+      const base = label;
+      let k = 2;
+      while (usedLabels.has(`${base}(${k})`)) k++;
+      label = `${base}(${k})`;
+      parseWarns.push({ key: 'pw_dup_colname', args: [base, label] });
+    }
+    usedLabels.add(label);
     colsParsed.push({ label, vals });
   }
   if (colsParsed.length < 1) throw new Error(t('perr_cols'));
@@ -1280,12 +1444,20 @@ function parseCSV(text, srcName) {
     parseWarns.push({ key: 'pw_missing_rows', args: [nDrop, body.length] });
   }
   const pick = (vals) => keepIdx ? keepIdx.map(i => vals[i]) : vals;
-  const dates = hasDateCol ? pick(col0).map(normalizeDate) : null;
-  const datesRawKept = hasDateCol ? pick(col0).slice() : null;
+  let dates = hasDateCol ? pick(col0).map(normalizeDate) : null;
+  let datesRawKept = hasDateCol ? pick(col0).slice() : null;
+  // R19 必修1:日期完整性(所有欄與日期整列同步剔除/重排,在 nav 偵測/轉換之前)
+  let colVals = colsParsed.map(col => pick(col.vals));
+  if (dates) {
+    const di = applyDateIntegrity(dates, [...colVals, datesRawKept], parseWarns);
+    dates = di.dates;
+    datesRawKept = di.arrays[di.arrays.length - 1];
+    colVals = di.arrays.slice(0, colsParsed.length);
+  }
 
   // 若只剩 1 條策略欄 → 退化成 returns
   if (colsParsed.length === 1) {
-    const vals = pick(colsParsed[0].vals);
+    const vals = colVals[0];
     const kind = detectSeriesKind(vals);
     const returns = kind === 'nav' ? navToReturns(vals) : vals;
     return {
@@ -1301,8 +1473,9 @@ function parseCSV(text, srcName) {
   const rawMatrix = {};
   const jsKinds = {};
   const names = [];
-  for (const col of colsParsed) {
-    const vals = pick(col.vals);
+  for (let k = 0; k < colsParsed.length; k++) {
+    const col = colsParsed[k];
+    const vals = colVals[k];
     const kind = detectSeriesKind(vals);
     matrix[col.label] = kind === 'nav' ? navToReturns(vals) : vals;
     rawMatrix[col.label] = vals.slice();
@@ -1311,7 +1484,7 @@ function parseCSV(text, srcName) {
   }
   return {
     mode: 'matrix', dates, returns: null, matrix, colNames: names,
-    srcName, nRows: keepIdx ? keepIdx.length : body.length,
+    srcName, nRows: colVals.length ? colVals[0].length : 0,
     noteKey: 'note_matrix', noteArgs: [names.length],
     rawMatrix, datesRaw: datesRawKept, jsKinds, parseWarns,
   };

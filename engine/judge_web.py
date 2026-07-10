@@ -52,7 +52,15 @@ def compute_metrics(returns, periods_per_year: float) -> dict:
     final_equity = float(eq[-1]) if n else 1.0
     total_return = final_equity - 1.0 if n else 0.0
     years = n / apy if apy else 0.0
-    cagr = (final_equity ** (1.0 / years) - 1.0) if years > 0 and final_equity > 0 else float("nan")
+    # R19 必修4:極端量級(如百分比誤當小數 → 單期報酬 500)會讓冪運算 OverflowError
+    # 裸崩——改夾成 inf(數學上就是天文數字),讓 analyze 的 extreme_returns 警語接手。
+    if years > 0 and final_equity > 0:
+        try:
+            cagr = final_equity ** (1.0 / years) - 1.0
+        except OverflowError:
+            cagr = float("inf")
+    else:
+        cagr = float("nan")
 
     mean = r.mean() * apy if n else 0.0
     vol = r.std(ddof=0) * np.sqrt(apy) if n else 0.0
@@ -472,12 +480,18 @@ def permutation_null(returns: np.ndarray, periods_per_year: float,
 def cost_stress(returns: np.ndarray, turnover: np.ndarray, cost_bps: float,
                 periods_per_year: float) -> dict:
     """每期扣 turnover_t × (cost_bps/1e4) × mult,看 ×1/×3/×6 後年化 Sharpe。
-    cost_bps 為「每 1.0 單位換手的 round-trip 成本(bps)」。"""
-    r = np.nan_to_num(np.asarray(returns, dtype=float), nan=0.0)
-    tn = np.nan_to_num(np.asarray(turnover, dtype=float), nan=0.0)
+    cost_bps 為「每 1.0 單位換手的 round-trip 成本(bps)」。
+
+    R19 必修3:非有限的 returns/turnover【不再填 0】——turnover 填 0 會低估成本、
+    returns 填 0 會壓低波動,皆屬 fail-open。改為逐期【剔除】非有限對;analyze 端另有
+    「非有限率 ≥5% → 跳過本閘」的守衛與揭露,本函數是直呼方的最後防線。"""
+    r = np.asarray(returns, dtype=float)
+    tn = np.asarray(turnover, dtype=float)
     apy = float(periods_per_year) if periods_per_year else 252.0
     n = min(r.size, tn.size)
     r, tn = r[:n], tn[:n]
+    fin = np.isfinite(r) & np.isfinite(tn) & (tn >= 0.0)  # 負換手=倒貼成本,一併剔除
+    r, tn = r[fin], tn[fin]
     base_cost = tn * (cost_bps / 1e4)
     out = {}
     for mult, key in ((1.0, "x1_sharpe"), (3.0, "x3_sharpe"), (6.0, "x6_sharpe")):
@@ -554,6 +568,12 @@ def _verdict(signals: dict) -> dict:
                         "的機率仍高(離散度為保守 proxy,非真試驗池)。",
                         "dsr_high_confidence", dsr=float(dsr), n_trials=int(n_trials),
                         var_proxy=True)
+            elif int(n_trials or 1) <= 1:
+                # R19 必修5c:n_trials=1 無多重檢定可扣——「扣掉試了 1 種參數的多重檢定」
+                # 是機翻感的假話(沒有通縮發生),zh/en 都走專用措辭。
+                _reason(f"通縮夏普(DSR)={dsr:.2f}:你未申報參數搜尋(n_trials=1),無多重"
+                        "檢定通縮可扣;以單曲線口徑檢定,真實有 edge 的機率高。",
+                        "dsr_high_confidence", dsr=float(dsr), n_trials=1)
             else:
                 _reason(f"通縮夏普(DSR)={dsr:.2f}:扣掉試了 {n_trials} 種參數的多重檢定後,真實有 edge 的機率仍高。",
                         "dsr_high_confidence", dsr=float(dsr), n_trials=int(n_trials))
@@ -577,9 +597,15 @@ def _verdict(signals: dict) -> dict:
                         var_proxy=True)
                 _flag(f"DSR={dsr:.2f} 低於雜訊地板 0.60。", "dsr_below_noise_floor",
                       dsr=float(dsr), var_proxy=True)
+            elif int(n_trials or 1) <= 1:
+                # R19 必修5c:n_trials=1 不存在多重檢定——「扣掉多重檢定後」措辭分流。
+                _reason(f"通縮夏普(DSR)={dsr:.2f} < 0.60:即使未申報參數搜尋(n_trials=1,"
+                        "無多重檢定通縮),真有 edge 的機率仍不到一半,高度疑似雜訊。",
+                        "dsr_below_noise_floor", dsr=float(dsr), n_trials=1)
+                _flag(f"DSR={dsr:.2f} 低於雜訊地板 0.60。", "dsr_below_noise_floor", dsr=float(dsr))
             else:
                 _reason(f"通縮夏普(DSR)={dsr:.2f} < 0.60:扣掉多重檢定後,真有 edge 的機率不到一半,高度疑似雜訊。",
-                        "dsr_below_noise_floor", dsr=float(dsr))
+                        "dsr_below_noise_floor", dsr=float(dsr), n_trials=int(n_trials))
                 _flag(f"DSR={dsr:.2f} 低於雜訊地板 0.60。", "dsr_below_noise_floor", dsr=float(dsr))
             _bump("dsr_below_noise_floor", -22.0)
             overfit = True
@@ -747,9 +773,23 @@ def _verdict(signals: dict) -> dict:
 # ===========================================================================
 def _infer_ppy(dates, fallback, warn=None):
     """由日期推年化頻率。warn=可選 (zh, code, **params) 回呼:解析失敗回退 252 時誠實告警
-    (修 R12 LOW:舊版裸 except 靜默吞掉壞日期,使用者不知道年化基準已悄悄變 252)。"""
-    if fallback:
-        return float(fallback)
+    (修 R12 LOW:舊版裸 except 靜默吞掉壞日期,使用者不知道年化基準已悄悄變 252)。
+
+    R19 必修4:明示的 periods_per_year 需為【正的有限數】——負值/0/NaN/不可解析會讓
+    年化夏普吃 sqrt(負數) 之類靜默變 NaN;無效時告警並改走日期推斷/252,不裸例外。
+    R19b 必修3:ppy=0(數值)修前被 `if fallback:` 當 falsy 靜默跳過驗證、無警語
+    (字串 "0" 與 -3 反而有)——矩陣宣稱「≤0 → 警語」因此超宣稱。改判 None 才算未申報,
+    0 走同一 ppy_invalid 告警路徑,行為維持保守回退。"""
+    if fallback is not None:
+        try:
+            f = float(fallback)
+        except (TypeError, ValueError):
+            f = float("nan")
+        if np.isfinite(f) and f > 0:
+            return f
+        if warn is not None:
+            warn(f"periods_per_year={fallback!r} 無效(需為正的有限數):已忽略,改由日期"
+                 "推斷(無日期則回退 252)。", "ppy_invalid", value=str(fallback))
     if dates and len(dates) > 2:
         try:
             idx = pd.to_datetime(pd.Series(dates))
@@ -790,6 +830,116 @@ def _missing_reject(zh: str, code: str, **params) -> dict:
             "reasons_coded": coded, "red_flags_coded": [], "score_breakdown": []}}
 
 
+def _date_integrity_guard(values, dates, keep_mask, warn):
+    """★R19 必修1:日期完整性守衛(重複時間戳/亂序)——與前端 parseCSV 同判準的第二層防禦★
+
+    實證騙局:把最好的 60 天整列複製 4 份再按日期排序上傳,重複列會把「好日子」灌水,
+    可把年化夏普 -2.49 的真虧策略洗成 86 分 likely-real。這也不只防作弊:pandas concat
+    不慎產生重複列是散戶常見意外,舊版會被靜默加分。
+
+    values=(T,) 或 (T,K) ndarray;dates=與列數等長的日期字串。政策(門檻與缺值守衛同 5%):
+    - 【完全相同的時間戳記】重複率 ≥5% → 結構化拒審(第 5 個回傳值=reject dict)。
+      唯一性用【解析後的完整時間戳】:含時間的日內資料各 bar 不相撞、不誤傷;date-only 的
+      日內資料會撞同一天 → 拒審訊息裡明講「請提供含時間的完整時間戳記」。
+    - 重複率 <5% → 保留首見、重複列【整列剔除】(合成進 keep_mask 供基準/turnover 同步)+告警。
+    - 去重後日期唯一但非遞增 → 依日期【穩定排序】恢復真實時序(排序是恢復真相不是竄改,
+      照實揭露亂序筆數),回 sort_perm(新座標 j ← 舊座標 sort_perm[j])供配對通道同步重排。
+    - 垃圾日期(解析不了的字串)【逐元素 coerce,不解除守衛】(R19b 必修1:修前任一垃圾
+      日期讓整段 early-return,1 格 "n/a" 就能靜默解除重複守衛=毒日期繞過):
+      可解析列照常做時戳級重複判定(分母=全列數);垃圾(NaT)列不參與重複判定——
+      N/A 不是時戳,identical 垃圾字串不構成「複製好日子」證據,那是「日期壞掉」問題,
+      照舊由 ppy_fallback 承擔;任一 NaT 在場 → 【跳過排序步】(無法建立全序)+
+      `dates_partially_unparseable` 誠實揭露;全垃圾 → 行為等同無日期(不給新能力)。
+    回 (values, dates, keep_mask, sort_perm, reject_or_None)。
+    """
+    n = int(values.shape[0])
+    d_str = [str(d) for d in dates]
+    # 逐元素解析(errors='coerce':垃圾字串只變 NaT,不再讓一格垃圾癱瘓整個守衛)。
+    # 用【解析後的時間戳值】判重複(比純字串嚴:'2024-01-01' 與 '2024/1/1' 同刻也算重複,
+    # 混格式閃避無效);含時間的日內資料各 bar 時戳不同 → 不誤傷。
+    # pandas 2.x/3.x 的整欄格式推斷會把混格式變體('2023/1/16')也 coerce 成 NaT
+    # (等於幫格式變體閃避洗白)→ 有 NaT 時再用 format='mixed'(逐元素推斷)重試,
+    # 取 NaT 較少者;兩者皆炸(極舊 pandas 等)才視同全不可解析。
+    try:
+        idx = pd.to_datetime(pd.Series(d_str), errors="coerce")
+    except Exception:
+        idx = None
+    if idx is None or bool(idx.isna().any()):
+        try:
+            idx2 = pd.to_datetime(pd.Series(d_str), format="mixed", errors="coerce")
+        except Exception:
+            idx2 = None
+        if idx2 is not None and (idx is None
+                                 or int(idx2.isna().sum()) < int(idx.isna().sum())):
+            idx = idx2
+    if idx is None:
+        return values, dates, keep_mask, None, None
+    nat = idx.isna().to_numpy()
+    n_nat = int(nat.sum())
+    if n_nat == n:
+        # 全垃圾 = 行為等同無日期(矩陣「不可解析」格已誠實標定;ppy_fallback 告警承擔)
+        return values, dates, keep_mask, None, None
+    ts = idx.values.astype("int64")   # NaT → iNaT 哨兵值,但 nat 遮罩已把它們排除在判重外
+    seen = set()
+    dup_pos = []
+    for i in np.flatnonzero(~nat).tolist():
+        v = int(ts[i])
+        if v in seen:
+            dup_pos.append(i)
+        else:
+            seen.add(v)
+    if dup_pos:
+        rate = len(dup_pos) / float(n)
+        if rate >= MISSING_MAX_RATE:
+            return values, dates, keep_mask, None, _missing_reject(
+                f"日期重複拒審:{len(dup_pos)}/{n} 期({rate * 100:.0f}%)的時間戳記與先前列"
+                "完全相同。重複列會把「好日子」複製灌水、人為抬高夏普與判分——本引擎不靜默"
+                "去重放行,重複率 ≥5% 時誠實拒審。請檢查資料(常見成因:pandas concat 產生"
+                "重複列、或蓄意複製最佳區段);若為日內資料,請提供含時間的完整時間戳記"
+                "(只給日期會使同日多根 bar 撞成重複)。",
+                "duplicate_dates_reject", n_dup=len(dup_pos), n_periods=n,
+                rate=round(rate, 4), threshold=MISSING_MAX_RATE)
+        keep2 = np.ones(n, dtype=bool)
+        keep2[dup_pos] = False
+        values = values[keep2]
+        dates = [d for d, k in zip(dates, keep2) if k]
+        ts = ts[keep2]
+        nat = nat[keep2]
+        if keep_mask is not None:
+            orig_pos = np.flatnonzero(keep_mask)
+            km = keep_mask.copy()
+            km[orig_pos[dup_pos]] = False
+            keep_mask = km
+        else:
+            keep_mask = keep2
+        warn(f"日期重複處理:{len(dup_pos)} 列的時間戳記與先前列完全相同(<5%),已【保留首見、"
+             f"整列剔除重複列】(重複列會複製好日子灌水判分,絕不靜默保留),有效樣本 "
+             f"{int(values.shape[0])} 期。",
+             "duplicate_dates_dropped", n_dup=len(dup_pos), n_kept=int(values.shape[0]))
+    # R19b 必修1:任一 NaT 在場 → 無法對整批資料建立全序 → 【跳過排序步】+誠實揭露
+    # (垃圾列已不參與上方判重;排序只在全可解析時發生,keep_mask/sort_perm 座標語意不變)
+    if n_nat:
+        warn(f"日期部分無法解析:{n_nat} 列的日期不是可解析的時間戳記(垃圾字串/空白等),"
+             "該些列【不參與重複判定】(N/A 不是時戳,相同的垃圾字串不構成「複製好日子」"
+             "證據——可解析列的重複判定照常執行),且本批資料【略過時序排序檢查】"
+             "(含不可解析日期無法建立完整時序)。年化頻率照舊由日期通道誠實回退並另行告警。",
+             "dates_partially_unparseable", n_unparseable=n_nat,
+             n_periods=int(values.shape[0]))
+        return values, dates, keep_mask, None, None
+    # 亂序檢查(去重後日期已唯一):非遞增 → 穩定排序恢復真實時序
+    sort_perm = None
+    if ts.size > 1 and not bool(np.all(np.diff(ts) > 0)):
+        order = np.argsort(ts, kind="stable")
+        n_moved = int((order != np.arange(order.size)).sum())
+        values = values[order]
+        dates = [dates[int(i)] for i in order]
+        sort_perm = order
+        warn(f"日期亂序處理:{n_moved} 列不在時間順序上,已依日期【穩定排序】恢復真實時序"
+             "後再檢定(排序是恢復真相、不是竄改資料——照實揭露)。",
+             "dates_sorted", n_moved=n_moved, n_periods=int(values.shape[0]))
+    return values, dates, keep_mask, sort_perm, None
+
+
 def analyze(payload: dict) -> dict:
     """統一裁判入口。契約見模組 docstring / README。純函數。
 
@@ -804,14 +954,37 @@ def analyze(payload: dict) -> dict:
 
     mode = payload.get("mode", "returns")
     dates = payload.get("dates")
-    n_trials = int(payload.get("n_trials") or 1)
+    # R19 必修4:n_trials 通道硬化——非整數/負值/0 不再靜默通過(int("abc") 會裸例外、
+    # 負值會流進通縮公式),一律回退 1(不通縮)並告警。
+    # R19b 必修3:修前 `int(... or 1)` 把 0 當 falsy 先換成 1 → n_trials=0 靜默回退、
+    # 無 n_trials_invalid 警語(負值反而有)。改為只有 None(未申報)才免驗,
+    # 0 落進下方 <1 的既有告警路徑,行為維持保守回退 1。
+    _nt_raw = payload.get("n_trials")
+    try:
+        n_trials = 1 if _nt_raw is None else int(_nt_raw)
+    except (TypeError, ValueError):
+        _warn(f"n_trials={payload.get('n_trials')!r} 無法解析為整數:已回退為 1(不通縮)。"
+              "請檢查申報值。", "n_trials_invalid", value=str(payload.get("n_trials")))
+        n_trials = 1
+    if n_trials < 1:
+        _warn(f"n_trials={n_trials} 無效(需 ≥1):已回退為 1(不通縮)。",
+              "n_trials_invalid", value=str(n_trials))
+        n_trials = 1
     n_trials_declared = n_trials  # R17 必修2:使用者申報值,供判決措辭誠實分流
-    ppy = _infer_ppy(dates, payload.get("periods_per_year"), warn=_warn)
     bench_ret = payload.get("benchmark_returns")
     bench_idx = payload.get("benchmark_idx")  # R17 必修4:交集日在使用者序列中的索引
     cost_bps = payload.get("cost_bps_per_turnover")
     turnover = payload.get("turnover")
     keep_mask = None  # R17 必修1:缺值剔除遮罩(原座標),供基準配對索引重映射
+    sort_perm = None  # R19 必修1:日期亂序穩定排序的置換(新座標 j ← 舊座標 sort_perm[j])
+    # R19 必修4:基準序列只解析一次;含不可解析型別 → 告警+略過所有基準通道(不裸例外)
+    bench_arr_raw = None
+    if bench_ret is not None:
+        try:
+            bench_arr_raw = np.asarray(bench_ret, dtype=float)
+        except (TypeError, ValueError):
+            _warn("基準序列含無法解析為數值的內容:本次【略過】所有基準相關檢定(略過不算通過)。",
+                  "bench_invalid_type")
 
     # ---- 取主報酬序列 ----
     if mode == "matrix":
@@ -824,7 +997,14 @@ def analyze(payload: dict) -> dict:
                     "reasons_coded": [{"code": "no_data", "params": {}}],
                     "red_flags_coded": [], "score_breakdown": []}}
         names = list(matrix.keys())
-        cols = [np.asarray(matrix[k], dtype=float) for k in names]
+        # R19 必修4:非數字型別 fail-closed(np.asarray(dtype=float) 對字串會裸例外 →
+        # 改結構化拒審,前端/直呼方都拿得到可渲染的原因)
+        try:
+            cols = [np.asarray(matrix[k], dtype=float) for k in names]
+        except (TypeError, ValueError):
+            return _missing_reject(
+                "資料型別拒審:matrix 含無法解析為數值的內容(非數字字串等)。"
+                "請確認每欄都是數值(報酬率或淨值)後再試。", "invalid_values_type")
         T = min(len(c) for c in cols)
         cols = [c[:T] for c in cols]
         mat = np.column_stack(cols)
@@ -864,6 +1044,17 @@ def analyze(payload: dict) -> dict:
             _warn(f"缺值處理:{n_drop} 列含空白/非數值,已【整列剔除】以保持各欄橫斷面對齊"
                   f"(絕不以 0 填補,填 0 會人為壓低波動),有效樣本 {T} 期。",
                   "missing_rows_dropped", n_rows_dropped=n_drop, n_kept=int(T))
+        # ★R19 必修1:日期完整性守衛(重複時間戳/亂序)——必須在挑最佳欄之前★
+        if dates is not None and len(dates) == T:
+            mat, dates, keep_mask, sort_perm, rej = _date_integrity_guard(
+                mat, dates, keep_mask, _warn)
+            if rej is not None:
+                return rej
+            T = int(mat.shape[0])
+        elif dates is not None and len(dates) != T:
+            _warn(f"日期欄長度({len(dates)})與資料期數({T})不符:日期僅用於頻率推斷,"
+                  "列級完整性檢查(重複/亂序/同步剔除)無法執行——請檢查資料。",
+                  "dates_len_mismatch", n_dates=int(len(dates)), n_periods=int(T))
         # 主序列 = matrix 內每期 Sharpe 最高者(使用者最可能上手的贏家)
         col_sr = np.array([_sharpe_periodic(mat[:, k]) for k in range(mat.shape[1])])
         best_k = int(np.nanargmax(col_sr)) if col_sr.size else 0
@@ -887,7 +1078,13 @@ def analyze(payload: dict) -> dict:
                 "檢定力薄弱,務必以更長樣本或前向(walk-forward)測試複核,別直接當真。",
                 "high_dim_low_power", n_cols=int(len(names)), n_periods=int(T))
     else:
-        returns = np.asarray(payload.get("returns") or [], dtype=float)
+        # R19 必修4:非數字型別 fail-closed(同 matrix)
+        try:
+            returns = np.asarray(payload.get("returns") or [], dtype=float)
+        except (TypeError, ValueError):
+            return _missing_reject(
+                "資料型別拒審:returns 含無法解析為數值的內容(非數字字串等)。"
+                "請確認序列是數值(報酬率或淨值)後再試。", "invalid_values_type")
         if returns.size == 0:
             return {"ok": False, "warnings": ["returns 模式但 returns 為空"],
                     "warnings_coded": [{"code": "returns_empty", "params": {}}],
@@ -917,9 +1114,22 @@ def analyze(payload: dict) -> dict:
                   f"填 0 會人為壓低波動、抬高夏普),有效樣本 {returns.size} 期,"
                   "統計檢定在剔除後的序列上執行。",
                   "missing_values_dropped", n_missing=n_bad, n_kept=int(returns.size))
+        # ★R19 必修1:日期完整性守衛(重複時間戳/亂序)★
+        if dates is not None and len(dates) == returns.size and returns.size > 0:
+            returns, dates, keep_mask, sort_perm, rej = _date_integrity_guard(
+                returns, dates, keep_mask, _warn)
+            if rej is not None:
+                return rej
+        elif dates is not None and len(dates) != returns.size:
+            _warn(f"日期欄長度({len(dates)})與資料期數({returns.size})不符:日期僅用於"
+                  "頻率推斷,列級完整性檢查(重複/亂序/同步剔除)無法執行——請檢查資料。",
+                  "dates_len_mismatch", n_dates=int(len(dates)), n_periods=int(returns.size))
         names, mat = None, None
         trial_sharpes = np.array([_sharpe_periodic(returns)])
         harden_diag = None  # returns 模式不硬化(硬化只在 matrix)
+
+    # R19 必修1:年化頻率在【日期完整性守衛之後】才推(重複/亂序日期會扭曲平均步距)
+    ppy = _infer_ppy(dates, payload.get("periods_per_year"), warn=_warn)
 
     n = returns.size
     if n < 30:
@@ -938,6 +1148,18 @@ def analyze(payload: dict) -> dict:
         _warn(f"資料日曆跨度僅 {span_years:.2f} 年(不到 0.5 年):所有年化數字(年化夏普/"
               "CAGR/年化波動)都是把短窗表現外插成一整年,參考性有限——建議累積至少半年再看年化。",
               "short_calendar_span", span_years=float(span_years))
+
+    # ---- 極端值提醒(R19 必修4):|單期報酬| ≥ 10(=1000%)幾乎必是單位錯 ----
+    #   最常見成因:把百分比當小數(5% 誤填成 5.0)。不拒審(可能有真極端事件),
+    #   但年化與判分會嚴重失真 → 誠實告警,請使用者確認單位。
+    if n:
+        n_extreme = int((np.abs(returns) >= 10.0).sum())
+        if n_extreme:
+            _warn(f"單期報酬量級異常:{n_extreme} 期的|報酬| ≥ 10(=1000%)。最常見成因是"
+                  "【把百分比當小數】(5% 誤填成 5.0)或單位錯誤——所有年化數字與判分會嚴重"
+                  "失真,請先確認報酬單位(小數:0.05 = 5%)再解讀本判決。",
+                  "extreme_returns", n=n_extreme,
+                  max_abs=float(np.max(np.abs(returns))))
 
     # ---- 長序列效能守衛(日內資料 >50k 期:permutation/bootstrap 在瀏覽器會拖垮)----
     #   誠實揭露:重抽次數降低只讓 p 值解析度變粗(p 的最小刻度 = 1/(n_perm+1)),
@@ -983,8 +1205,10 @@ def analyze(payload: dict) -> dict:
         T_mat = mat.shape[0]
         fwer_bench_kind = "zero_no_benchmark"
         fwer_bench_cov = None
-        if bench_ret is not None:
-            b_arr = np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)
+        fwer_keep = None  # R19 必修3:基準非有限率 <5% 時的 FWER 專用剔列遮罩(mat+bench 同步)
+        if bench_arr_raw is not None:
+            # ★R19 必修3:基準不再 nan_to_num 填 0(填 0 稀釋基準=反保守 fail-open)★
+            b_arr = bench_arr_raw
             # ★R17 收尾(驗收官刀):引擎剔除過缺值列時,基準必須以同一 keep_mask 同步剔除,
             #   否則 b_arr[:T_mat] 位置截斷會逐期錯位、卻仍宣稱 aligned/coverage=1.0(假揭露)。
             #   基準長度=原始列數 → 同步剔除;對不上原始列數 → 無法確定配對,誠實降級零基準。
@@ -996,13 +1220,40 @@ def analyze(payload: dict) -> dict:
                     bench_pairable = False
             if bench_pairable and b_arr.size >= T_mat:
                 bench_arr = b_arr[:T_mat]
-                fwer_bench_kind = "aligned"
-                fwer_bench_cov = 1.0
+                # R19 必修1:列經日期穩定排序 → 基準同步重排,維持逐期配對
+                if sort_perm is not None:
+                    bench_arr = bench_arr[sort_perm]
+                # ★R19 必修3:基準缺值 fail-closed(與策略端同標準、同 5% 門檻)★
+                bfin = np.isfinite(bench_arr)
+                n_bad_b = int((~bfin).sum())
+                if n_bad_b == 0:
+                    fwer_bench_kind = "aligned"
+                    fwer_bench_cov = 1.0
+                elif n_bad_b / float(T_mat) >= MISSING_MAX_RATE:
+                    fwer_bench_cov = round(float(bfin.sum()) / float(T_mat), 4)
+                    bench_arr = np.zeros(T_mat)
+                    fwer_bench_kind = "zero_fallback"
+                    _warn(f"SPA/Romano-Wolf 的基準有 {n_bad_b}/{T_mat} 期"
+                          f"({n_bad_b / T_mat * 100:.0f}%)為非有限值(NaN/inf):以 0 填補會"
+                          "稀釋基準、讓「贏過基準」變太容易——本引擎絕不填 0,此檢定已誠實降級為 "
+                          "vs 絕對報酬(零基準)執行,勿當作「贏過基準」。",
+                          "fwer_bench_nonfinite_fallback_zero",
+                          coverage=fwer_bench_cov, n_nonfinite=n_bad_b, n_periods=int(T_mat))
+                else:
+                    fwer_keep = bfin
+                    fwer_bench_kind = "aligned"
+                    fwer_bench_cov = round(float(bfin.sum()) / float(T_mat), 4)
+                    _warn(f"SPA/Romano-Wolf 的基準有 {n_bad_b}/{T_mat} 期為非有限值"
+                          f"(NaN/inf,<5%):該些期已從 FWER 檢定【剔除】(矩陣與基準同步、"
+                          f"絕不填 0),FWER 在 {int(bfin.sum())} 期上執行——與主判決的樣本數"
+                          "不同,照實揭露。",
+                          "fwer_bench_nonfinite_rows_dropped",
+                          n_dropped=n_bad_b, n_used=int(bfin.sum()))
             elif not bench_pairable:
                 fwer_bench_cov = 0.0
                 bench_arr = np.zeros(T_mat)
                 fwer_bench_kind = "zero_fallback"
-                _warn(f"SPA/Romano-Wolf 的基準無法逐期配對:引擎已因缺值整列剔除 "
+                _warn(f"SPA/Romano-Wolf 的基準無法逐期配對:引擎已因缺值/重複日期整列剔除 "
                       f"{int((~keep_mask).sum())} 列,而基準長度({b_arr.size} 期)與原始矩陣"
                       f"列數({int(keep_mask.size)})不符,剔除後無法同步重配對。此檢定已改為 "
                       "vs 絕對報酬(零基準)誠實執行——勿當作「贏過基準」。",
@@ -1020,7 +1271,11 @@ def analyze(payload: dict) -> dict:
                       bench_len=int(b_arr.size), n_periods=int(T_mat))
         else:
             bench_arr = np.zeros(T_mat)
-        fw = run_fwer_gates(mat, names, bench_arr, n_bootstrap=n_boot_eff, n_blocks_pbo=12)
+        # R19 必修3:基準非有限率 <5% → 該些列從 FWER 計算剔除(mat+bench 一起);
+        # PBO(pbo_out)不吃基準,維持全樣本。
+        mat_f = mat[fwer_keep] if fwer_keep is not None else mat
+        bench_f = bench_arr[fwer_keep] if fwer_keep is not None else bench_arr
+        fw = run_fwer_gates(mat_f, names, bench_f, n_bootstrap=n_boot_eff, n_blocks_pbo=12)
         fwer_out = {"spa": fw["spa"], "per_candidate": fw["per_candidate"],
                     "n_rejected": fw["n_rejected"],
                     "benchmark_kind": fwer_bench_kind, "bench_coverage": fwer_bench_cov,
@@ -1030,14 +1285,59 @@ def analyze(payload: dict) -> dict:
                   "fwer_not_computed", n_obs=int(fw.get("n_obs", 0)), min_obs=100)
 
     # ---- 成本壓力(僅有 turnover)----
+    #   R19 必修3:turnover 的 fail-open 收口——非有限值填 0 會【低估成本】放水過關。
+    #   政策(與策略端同 5% 門檻):<5% → 該些期從成本計算剔除+揭露;≥5% → 跳過
+    #   cost_stress+警語(絕不填 0)。cost_bps 負值/非有限也拒(負成本=倒貼,反保守)。
     cost_out = None
     if turnover is not None and cost_bps is not None:
-        tn = np.asarray(turnover, dtype=float)
-        # R17 收尾:引擎剔除過缺值列 → turnover 以同一 keep_mask 同步剔除,維持逐期配對
-        # (長度對不上原始列數時維持舊的 min 截斷——輸入本身就配不齊,非剔除造成)。
-        if keep_mask is not None and tn.size == keep_mask.size:
-            tn = tn[keep_mask]
-        cost_out = cost_stress(returns, tn, float(cost_bps), ppy)
+        try:
+            cb = float(cost_bps)
+        except (TypeError, ValueError):
+            cb = float("nan")
+        try:
+            tn = np.asarray(turnover, dtype=float)
+        except (TypeError, ValueError):
+            tn = None
+        if not np.isfinite(cb) or cb < 0:
+            _warn(f"cost_bps_per_turnover={cost_bps!r} 無效(需為非負的有限數):本次【略過】"
+                  "成本壓力測試(略過不算通過)。", "cost_bps_invalid", value=str(cost_bps))
+        elif tn is None:
+            _warn("turnover 含無法解析為數值的內容:本次【略過】成本壓力測試(略過不算通過)。",
+                  "turnover_invalid_type")
+        else:
+            # R17 收尾:引擎剔除過缺值/重複列 → turnover 以同一 keep_mask 同步剔除;
+            # R19:列經日期排序 → 同步重排,維持逐期配對。
+            if keep_mask is not None and tn.size == keep_mask.size:
+                tn = tn[keep_mask]
+            # R19b 必修2:長度檢查必須在截斷/排序【之前】——修前 tn[:n][sort_perm]
+            # 先把長度切齊,turnover_len_mismatch 在日期被排序過的資料上永不觸發(假沉默)。
+            if tn.size != n:
+                _warn(f"turnover 長度({tn.size})與報酬期數({n})不符:以「雙邊截到共同長度」"
+                      "概略配對計算成本(照實揭露;請確認兩者是否同一時段的逐期序列)。",
+                      "turnover_len_mismatch", turnover_len=int(tn.size), n_periods=int(n))
+            if sort_perm is not None and tn.size >= n:
+                tn = tn[:n][sort_perm]
+            m_c = int(min(n, tn.size))
+            r_c, tn_c = returns[:m_c], tn[:m_c]
+            # 無效期 = 非有限【或負值】:負 turnover 會讓 net = r - tn×cost 反向【加分】
+            # (負成本=倒貼),與填 0 同屬 fail-open,一律同門檻處理。
+            tfin = np.isfinite(tn_c) & (tn_c >= 0.0)
+            n_bad_t = int((~tfin).sum())
+            if m_c and n_bad_t / float(m_c) >= MISSING_MAX_RATE:
+                _warn(f"turnover 有 {n_bad_t}/{m_c} 期({n_bad_t / m_c * 100:.0f}%)為非有限值"
+                      "(NaN/inf)或負值:以 0 填補會【低估成本】、負換手更會倒貼加分——"
+                      "本引擎絕不填 0,無效率 ≥5% 時【略過】成本壓力測試(略過不算通過)。"
+                      "請補齊換手率後再試。",
+                      "turnover_nonfinite_skipped", n_nonfinite=n_bad_t, n_periods=int(m_c),
+                      rate=round(n_bad_t / float(m_c), 4), threshold=MISSING_MAX_RATE)
+            else:
+                if n_bad_t:
+                    r_c, tn_c = r_c[tfin], tn_c[tfin]
+                    _warn(f"turnover 有 {n_bad_t} 期為非有限值(NaN/inf)或負值(<5%):該些期"
+                          f"已從成本計算【剔除】(絕不填 0 低估成本、絕不讓負換手倒貼),"
+                          f"成本閘在 {int(tn_c.size)} 期上執行。",
+                          "turnover_nonfinite_dropped", n_dropped=n_bad_t, n_used=int(tn_c.size))
+                cost_out = cost_stress(r_c, tn_c, cb, ppy)
 
     # ---- 基準比較(R17 必修4:共同日【配對子集】比較)----
     #   修前:交集對齊的 bench 只含兩邊都有的日子、策略卻用全序列各自彙總比較 →
@@ -1047,35 +1347,72 @@ def analyze(payload: dict) -> dict:
     #   引擎若剔除過缺值列,先把配對索引同步剔除並重映射;無 idx 時退回「雙邊截到共同
     #   長度」的位置配對(等長情形與舊行為逐位相同,不再讓策略單邊多算)。
     bench_cmp = None
-    if bench_ret is not None:
-        b = np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)
+    if bench_arr_raw is not None:
+        # R19 必修3:基準不再 nan_to_num 填 0(填 0 稀釋基準)——非有限對在下方 pairwise 剔除
+        b = bench_arr_raw
         strat_pair = None
         paired = False
+        skip_pair = False
         if bench_idx is not None:
             idx = np.asarray(list(bench_idx), dtype=int) if len(bench_idx) else np.empty(0, dtype=int)
             n_orig = int(keep_mask.size) if keep_mask is not None else n
+            # R19 必修4:idx 需【唯一】——重複索引會把同一天算兩次(灌水配對樣本)
             valid = (idx.size == b.size and idx.size >= 2
-                     and int(idx.min()) >= 0 and int(idx.max()) < n_orig)
+                     and int(idx.min()) >= 0 and int(idx.max()) < n_orig
+                     and int(np.unique(idx).size) == int(idx.size))
+            idx_input_invalid = not valid
             if valid and keep_mask is not None:
-                # 缺值剔除過:落在被剔除列上的配對日一併剔除(基準側同步),再重映射到新座標
+                # 缺值/重複列剔除過:落在被剔除列上的配對日一併剔除(基準側同步),再重映射到新座標
                 pair_ok = keep_mask[idx]
                 new_pos = np.cumsum(keep_mask) - 1
                 idx = new_pos[idx[pair_ok]]
                 b = b[pair_ok]
                 valid = idx.size >= 2
+            if valid and sort_perm is not None:
+                # R19 必修1:列經日期穩定排序 → 配對索引映射到新座標,並依時序重排配對
+                inv = np.empty(n, dtype=int)
+                inv[sort_perm] = np.arange(n)
+                idx = inv[idx]
+                order2 = np.argsort(idx, kind="stable")
+                idx = idx[order2]
+                b = b[order2]
             if valid:
                 strat_pair = returns[idx]
                 paired = True
-            else:
-                _warn("基準配對索引無效(長度/範圍不符,或配對後不足 2 期):"
+            elif idx_input_invalid:
+                _warn("基準配對索引無效(長度/範圍/唯一性不符或不足 2 期):"
                       "退回「雙邊截到共同長度」的位置配對比較。",
                       "bench_pair_idx_invalid",
                       idx_len=int(np.asarray(list(bench_idx)).size), bench_len=int(b.size))
-        if strat_pair is None:
+            else:
+                # R19 順修 LOW:配對索引重映射後剩 <2 對——此時基準已是配對子集、無法退回
+                # 位置配對(會逐期錯位),誠實【略過】本卡並照實說明(舊警語謊稱「退回位置配對」)。
+                _warn("基準配對索引經缺值/重複列剔除同步後剩不到 2 對:配對樣本不足,"
+                      "本次【略過】基準比較(不退回位置配對——該退路在此無法保證逐期對應)。",
+                      "bench_pair_too_few", n_pairs=int(idx.size))
+                skip_pair = True
+        if strat_pair is None and not skip_pair:
+            # R19 必修2:位置配對退路也必須吃 keep_mask/sort_perm——修前用【原座標】基準對
+            # 【剔列後】策略位置截斷,逐期錯位(實測錯位夏普 2.4868 vs 對齊真值 1.9889),
+            # 且與同一報告的 benchmark_curve(已吃 keep_mask)自相矛盾。
+            if keep_mask is not None and b.size == keep_mask.size:
+                b = b[keep_mask]
+            if sort_perm is not None and b.size >= n:
+                b = b[:n][sort_perm]
             m_len = int(min(n, b.size))
             b = b[:m_len]
             strat_pair = returns[:m_len]
-        if b.size >= 2:
+        if strat_pair is not None and b.size:
+            # R19 必修3:配對子集內 pairwise 剔除非有限對(絕不填 0),n_paired 如實反映
+            bfin_p = np.isfinite(b)
+            n_bad_p = int((~bfin_p).sum())
+            if n_bad_p:
+                b = b[bfin_p]
+                strat_pair = strat_pair[bfin_p]
+                _warn(f"基準比較:{n_bad_p} 個配對期的基準值為非有限(NaN/inf),已【逐對剔除】"
+                      f"(絕不以 0 填補稀釋基準),實際配對 {int(b.size)} 期——如實揭露。",
+                      "bench_pairs_dropped_nonfinite", n_dropped=n_bad_p, n_paired=int(b.size))
+        if strat_pair is not None and b.size >= 2:
             bm = compute_metrics(b, ppy)
             sm = compute_metrics(strat_pair, ppy)  # 配對子集上的策略指標(僅供本卡)
             excess = (sm["cagr"] - bm["cagr"]) if (np.isfinite(sm["cagr"]) and np.isfinite(bm["cagr"])) else float("nan")
@@ -1107,10 +1444,14 @@ def analyze(payload: dict) -> dict:
     equity_curve = _equity_from_returns(returns).tolist()
     bench_curve = None
     if bench_cmp is not None:
-        b = np.nan_to_num(np.asarray(bench_ret, dtype=float), nan=0.0)
-        # R17 收尾:剔除過缺值列 → 基準曲線同步剔除,與主曲線逐期對齊
+        # 視覺層維持 nan_to_num(曲線平接):基準缺值已由上方 bench_pairs_dropped_nonfinite /
+        # fwer_bench_nonfinite_* 警語如實揭露,此處只影響畫圖、不進任何判分。
+        b = np.nan_to_num(bench_arr_raw, nan=0.0)
+        # R17 收尾:剔除過缺值/重複列 → 基準曲線同步剔除;R19:排序同步,與主曲線逐期對齊
         if keep_mask is not None and b.size == keep_mask.size:
             b = b[keep_mask]
+        if sort_perm is not None and b.size >= n:
+            b = b[:n][sort_perm]
         bench_curve = _equity_from_returns(b[:n]).tolist()
 
     return {
@@ -1195,11 +1536,13 @@ def detect_series_kind(vals) -> str:
 
 
 def nav_to_returns(vals) -> list:
-    """淨值 → 逐期報酬(與 app.js navToReturns 同語意):首期 0;前值為 0 → 該期 0。
+    """淨值 → 逐期報酬(與 app.js navToReturns 同語意):首期 0。
 
     ★R17 必修1:非有限/不可解析值【不再填 0】★——改保留 NaN(自身與下一期的報酬都成
     NaN,因為兩者都依賴缺失的淨值),交由 analyze 入口的缺值守衛整期剔除或拒審。
-    舊行為(NaN→0 → prev=0 → 報酬 0)等於憑空捏造「持平日」,會稀釋波動,已移除。"""
+    舊行為(NaN→0 → prev=0 → 報酬 0)等於憑空捏造「持平日」,會稀釋波動,已移除。
+    ★R19 必修5b:前值為 0 也改 NaN★——除以 0 無法定義報酬,舊行為記 0.0 等於憑空捏造
+    「持平日」稀釋波動;改 NaN 傳播、交同一套缺值守衛(<5% 剔除揭露、≥5% 拒審)。"""
     clean = []
     for v in (vals or []):
         try:
@@ -1210,10 +1553,8 @@ def nav_to_returns(vals) -> list:
     out = [0.0]
     for i in range(1, len(clean)):
         prev, cur = clean[i - 1], clean[i]
-        if not (np.isfinite(prev) and np.isfinite(cur)):
+        if not (np.isfinite(prev) and np.isfinite(cur)) or prev == 0.0:
             out.append(float("nan"))
-        elif prev == 0.0:
-            out.append(0.0)
         else:
             out.append(cur / prev - 1.0)
     return out

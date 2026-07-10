@@ -36,6 +36,8 @@ jobs:
         run: node tools/verify_align.node.js
       - name: Verify missing-value fail-closed guards
         run: node tools/verify_missing.node.js
+      - name: Verify date-integrity + RFC4180 quote-aware parsing
+        run: node tools/verify_integrity.node.js
 
   # 慢層:每週排程 + 手動觸發,跑完整套件(含對抗網格掃描)
   full:

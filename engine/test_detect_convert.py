@@ -69,9 +69,11 @@ class TestNavToReturns:
         assert r[1] == pytest.approx(0.10)
         assert r[2] == pytest.approx(99.0 / 110.0 - 1.0)
 
-    def test_zero_prev_gives_zero(self):
+    def test_zero_prev_gives_nan(self):
+        # R19 必修5b:prev==0 除以 0 無法定義報酬——舊行為記 0.0 = 憑空捏造「持平日」
+        # 稀釋波動,改 NaN 傳播、交 analyze 入口的缺值守衛(<5% 剔除揭露、≥5% 拒審)。
         r = nav_to_returns([0.0, 50.0, 100.0])
-        assert r[0] == 0.0 and r[1] == 0.0 and r[2] == pytest.approx(1.0)
+        assert r[0] == 0.0 and math.isnan(r[1]) and r[2] == pytest.approx(1.0)
 
     def test_nan_propagates_fail_closed(self):
         # R17 必修1:NaN/None 不再填 0(填 0 = 憑空捏造持平日、稀釋波動)——
