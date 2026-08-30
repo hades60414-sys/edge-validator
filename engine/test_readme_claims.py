@@ -17,6 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
+INTEGRITY_MATRIX = ROOT / "docs" / "INTEGRITY_MATRIX.md"
 
 
 def _readme_text() -> str:
@@ -99,3 +100,20 @@ def test_readme_statshim_line_claims_exact():
     en = _claimed(r"A\s+([\d,]+)-line\s+pure-numpy", text)
     assert zh == actual, f"README(中)宣稱 statshim {zh} 行,實際 {actual} 行——請更新 README。"
     assert en == actual, f"README(英)宣稱 statshim {en}-line,實際 {actual} 行——請更新 README。"
+
+
+def test_integrity_matrix_r23_missing_sensitivity_contract():
+    """R23 文件必須與實作公式、誤傷成本及誠實邊界同步，禁止只改程式不改契約。"""
+    text = INTEGRITY_MATRIX.read_text(encoding="utf-8")
+    formula = "`min(observed_min, -3 * sigma_obs)`"
+    assert text.count(formula) >= 3, (
+        "INTEGRITY_MATRIX 必須在 R23 校準揭露、returns 與 matrix 三處寫明補入公式")
+    for measured_cost in ("12/30 = 40%", "21/30 = 70%", "20/21 = 95%"):
+        assert measured_cost in text, f"INTEGRITY_MATRIX 缺少 R23 誤傷成本:{measured_cost}"
+    assert "無法代表更深的黑天鵝" in text, "INTEGRITY_MATRIX 缺少 3σ 情境的黑天鵝邊界"
+
+    src = (ROOT / "engine" / "judge_web.py").read_text(encoding="utf-8")
+    assert re.search(
+        r"fill_v\s*=\s*float\(min\(np\.min\(returns\),\s*-3\.0\s*\*\s*sigma_obs\)\)",
+        src,
+    ), "引擎 R23 補入公式已漂移；請同步重校準並更新完整性矩陣"

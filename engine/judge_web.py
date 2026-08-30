@@ -751,15 +751,19 @@ def _verdict(signals: dict) -> dict:
     else:
         overall = "inconclusive"
 
-    # --- 缺值敏感度 fail-closed(★R21 必修2★)---
-    #   <5% 缺值剔除發生過,且以觀測 min(觀測期間最差單期報酬)補入被剔除期後,DSR 觸發
-    #   兩層降級判準之一(unstable):
+    # --- 缺值敏感度 fail-closed(★R21 必修2;R23 補入值收緊為 min(觀測 min, −3σ)★)---
+    #   <5% 缺值剔除發生過,且以 −3σ 級壓力(觀測最差單期報酬與 −3σ_obs 取較深者)補入
+    #   被剔除期後,DSR 觸發兩層降級判準之一(unstable):
     #     (a) 0.60 向下穿越——敏感度 DSR 從雜訊地板(NOISE_FLOOR=0.60)之上跌破 0.60;
     #     (b) 0.95 支柱塌陷——原判決倚賴 DSR≥REAL_CONF_BAR(0.95)這根高信心支柱,
     #         而敏感度 DSR 跌破 0.95(支柱塌了,likely-real 的根據不復存在);
     #   而原判決會是 likely-real → 降級 inconclusive:被剔除期間的真實報酬不可驗證,
     #   若實為極端虧損日則 edge 消失——無法驗證,誠實不判 likely-real。
     #   原判決非 likely-real 或敏感度存活 → 不進此分支,只由警語揭露(不多罰)。
+    #   已知設計縫隙(R22 quant 實測,誠實記錄於 INTEGRITY_MATRIX):原 DSR 落在
+    #   0.60–0.95 盲帶(likely-real 靠其他閘湊分、不倚賴 0.95 支柱)且敏感度 DSR 塌陷
+    #   後仍未跌破 0.60 → 兩判準都不觸發(quant 60 seed 掃描命中 1/60)。收斂後不加
+    #   第三層判準(避免過度工程);警語仍如實揭露敏感度數字,讀者可自行判斷。
     ms = signals.get("missing_sens")
     if overall == "likely-real" and ms and ms.get("unstable"):
         overall = "inconclusive"
@@ -767,7 +771,8 @@ def _verdict(signals: dict) -> dict:
         bar_zh = ("雜訊地板" if bar == ms.get("noise_floor")
                   else "高信心地板(本判決倚賴的 DSR 支柱)")
         _reason(f"缺值敏感度下判決不穩:被剔除的 {int(ms['n_missing'])} 期真實報酬不可驗證;"
-                f"若它們實為極端虧損日(以觀測期間最差單期報酬補入試算:年化夏普 "
+                f"若它們實為極端虧損日(以 −3σ 級壓力補入試算,取觀測最差單期報酬與 "
+                f"−3×觀測波動之較深者:年化夏普 "
                 f"{ms['sharpe_observed']:.2f}→{ms['sharpe_sensitivity']:.2f}、DSR "
                 f"{ms['dsr_observed']:.2f}→{ms['dsr_sensitivity']:.2f} 跌破{bar_zh} "
                 f"{bar:.2f}),edge 站不住——缺失期間無法驗證,誠實不判 likely-real,"
@@ -778,8 +783,9 @@ def _verdict(signals: dict) -> dict:
                 sharpe_sensitivity=float(ms["sharpe_sensitivity"]),
                 dsr_observed=float(ms["dsr_observed"]),
                 dsr_sensitivity=float(ms["dsr_sensitivity"]), bar=bar)
-        _flag(f"缺值敏感度:以觀測最差單期報酬補入被剔除期後 DSR={ms['dsr_sensitivity']:.2f} "
-              f"跌破 {bar:.2f},判決在缺值敏感度下不穩。", "missing_sensitivity_unstable",
+        _flag(f"缺值敏感度:以 −3σ 級壓力(觀測最差與 −3σ 取較深者)補入被剔除期後 "
+              f"DSR={ms['dsr_sensitivity']:.2f} 跌破 {bar:.2f},判決在缺值敏感度下不穩。",
+              "missing_sensitivity_unstable",
               dsr_sensitivity=float(ms["dsr_sensitivity"]), bar=bar)
 
     # 誠實收尾:過關不等於會賺
@@ -1278,13 +1284,21 @@ def analyze(payload: dict) -> dict:
     #   以「缺值集中在極端虧損日」情境補入被剔除期數,只重算夏普與 DSR 兩個數
     #   (不遞迴整個 verdict;兩者皆順序不變量,補在尾端與補在原位逐位等值)。
     #   補入值的選擇(實測校準,勿回退 p5):在該情境下每個缺失期 ≤ 觀測最小值,故以
-    #   【觀測期間最差單期報酬(min)】補入=該情境的溫和下界(非無界最壞)。曾試
-    #   觀測 p5:對上述騙局補入後 DSR 仍 0.97,連高信心地板(0.95)都打不破=規則形同
-    #   虛設;min 補入把騙局壓到 0.93 而誠實強 edge(夏普 2.5+、2% 隨機缺值)仍 ≥0.99,
-    #   校準見 test_r21。
+    #   【觀測期間最差單期報酬(min)】為基準補入。曾試觀測 p5:對上述騙局補入後 DSR
+    #   仍 0.97,連高信心地板(0.95)都打不破=規則形同虛設;min 補入把騙局壓到 0.93
+    #   而誠實強 edge(夏普 2.5+、2% 隨機缺值)仍 ≥0.99,校準見 test_r21。
+    #   ★R23 必修1:補入值收緊為 min(觀測 min, −3σ_obs)★
+    #   R22 quant 打穿裸觀測 min:有界分布騙局——381 期 uniform[-0.8%, +1.0%] 平滑收租
+    #   +挖掉 19 個 -6% 崩盤日(4.75%<5%)→ 觀測 min=-0.8% 補入太溫和,DSR 只壓到
+    #   0.99、unstable=False,14 分翻 86 分(公開站 E2E 復現)。統計原則:缺值若集中
+    #   在壞日子,那些日子至少是 3σ 級事件;肥尾真實資料的觀測 min 通常已 <−3σ →
+    #   行為不變、不加誤傷;只有薄尾平滑序列(short-vol 收租形態=正該起疑)才收緊。
+    #   σ_obs=剔除後觀測報酬的 std(ddof=0,與 compute_metrics/_sharpe_periodic 同慣例)。
+    #   誠實邊界:此試算代表「3σ 級壞日」情境,無法代表更深的黑天鵝——警語如實聲明。
     missing_sens = None
     if missing_sens_pend is not None and returns.size >= 2:
-        fill_v = float(np.min(returns))
+        sigma_obs = float(returns.std(ddof=0))
+        fill_v = float(min(np.min(returns), -3.0 * sigma_obs))
         kv = missing_sens_pend.get("known_vals")
         if kv is not None:
             kv = np.asarray(kv, dtype=float)
@@ -1317,15 +1331,18 @@ def analyze(payload: dict) -> dict:
                         "winner_known_used": bool(kv is not None)}
         # 警語升級(同 index 原地改寫,zh 與 coded params 同步):中性一句話 →
         # 「真實報酬不可驗證+缺值集中在極端虧損日會高估」+敏感度數字,絕不輕描淡寫。
+        # R23 收尾:dsr 為 NaN 時不印「nan」——以「—」美觀呈現(app.js fmt 同語意)。
+        _f2 = lambda x: (f"{x:.2f}" if np.isfinite(x) else "—")
         wi = int(missing_sens_pend["warn_idx"])
         warnings[wi] = (warnings[wi]
                         + f"注意:被剔除期間的真實報酬【不可驗證】——若缺值集中在極端虧損日,"
                           f"績效與判決會被高估。敏感度試算(被剔除的 "
-                          f"{missing_sens['n_missing']} 期以觀測期間最差單期報酬 "
-                          f"{fill_v:.4f} 補入"
+                          f"{missing_sens['n_missing']} 期以 −3σ 級壓力補入:取觀測期間"
+                          f"最差單期報酬與 −3×觀測波動之較深者 = {fill_v:.4f}"
                         + ("、贏家欄自身有值的列用真實值" if kv is not None else "")
-                        + f"):年化夏普 {sharpe_obs:.2f}→{sharpe_sens:.2f}、"
-                          f"DSR {dsr_obs:.2f}→{dsr_sens:.2f}。")
+                        + f"):年化夏普 {_f2(sharpe_obs)}→{_f2(sharpe_sens)}、"
+                          f"DSR {_f2(dsr_obs)}→{_f2(dsr_sens)}。此試算代表"
+                          f"「3σ 級壞日」情境,無法代表更深的黑天鵝。")
         warnings_coded[wi]["params"].update({
             "fill_value": fill_v, "sharpe_observed": sharpe_obs,
             "sharpe_sensitivity": sharpe_sens,

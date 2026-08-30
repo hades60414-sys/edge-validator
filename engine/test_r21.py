@@ -13,6 +13,11 @@
   或靜默地板截斷 → 一律走 bench_pair_idx_invalid 警語+位置配對退路。
 (必修1 README 校準釘子在 test_readme_claims.py;必修5 前端圖表座標在
  tools/verify_align.node.js 的 R20 斷言區。)
+
+R23 收尾手術(檔尾 R23 區):補入值收緊為 min(觀測 min, −3σ_obs)——R22 quant 的
+有界分布騙局(平滑收租+挖崩盤日,觀測 min 太溫和打不穿判準)修法;肥尾誠實資料
+觀測 min 通常已 <−3σ → 行為不變;誤傷率(誠實 edge 被降級的代價)以多 seed 量測
+入檔並斷言區間(數字同步揭露於 docs/INTEGRITY_MATRIX.md)。
 """
 import numpy as np
 import pandas as pd
@@ -257,3 +262,118 @@ def test_bench_idx_integral_floats_accepted_as_ints(_bench_setup):
     assert out_f["ok"] and out_f["benchmark_compare"]["paired"] is True
     assert out_f["benchmark_compare"] == out_i["benchmark_compare"]
     assert "bench_pair_idx_invalid" not in _codes(out_f["warnings_coded"])
+
+
+# ===========================================================================
+# R23 收尾手術:補入值 = min(觀測 min, −3σ_obs)
+# ===========================================================================
+def _run_returns(vals):
+    return analyze({"mode": "returns", "returns": vals,
+                    "periods_per_year": 252, "n_trials": 1})
+
+
+def test_bounded_scam_downgraded_r23():
+    """R22 quant 的有界分布騙局必須降級(R23 必修1)。
+
+    構造(R22 panel 實錄):381 期 uniform[-0.8%, +1.0%] 平滑收租 + 挖掉 19 個 -6%
+    崩盤日(4.75%<5%)。修前:觀測 min=-0.8% 補入太溫和,DSR 只壓到 0.99、
+    unstable=False → 14 分翻 86 分 likely-real(公開站 E2E 復現)。修後:薄尾平滑
+    序列的 −3σ_obs 比觀測 min 深 → fill 收緊,DSR 跌破 0.95 支柱 → 降級。"""
+    rng = np.random.default_rng(20260710)
+    smooth = rng.uniform(-0.008, 0.010, 381)
+    crash = np.full(19, -0.06)
+    full = np.concatenate([smooth, crash])
+    rng.shuffle(full)
+    honest = _run_returns(full.tolist())
+    assert honest["verdict"]["overall"] != "likely-real"   # 騙局前提:誠實全序列非真
+    vals = full.tolist()
+    for i in np.argsort(full)[:19]:
+        vals[int(i)] = None
+    out = _run_returns(vals)
+    assert out["ok"] is True
+    ms = out["missing_sensitivity"]
+    kept = np.array([v for v in vals if v is not None], dtype=float)
+    # 薄尾平滑序列:−3σ 比觀測 min 深 → fill 必須取 −3σ(修前=觀測 min 即放行)
+    assert ms["fill_value"] == pytest.approx(-3.0 * kept.std(ddof=0))
+    assert ms["fill_value"] < float(kept.min())
+    assert ms["unstable"] is True
+    assert out["verdict"]["overall"] == "inconclusive"
+    assert "missing_sensitivity_downgrade" in _codes(out["verdict"]["reasons_coded"])
+
+
+def test_fill_value_is_min_of_obs_min_and_minus_3_sigma():
+    """fill_v = min(觀測 min, −3σ_obs) 逐位釘死(σ_obs=剔除後序列 std, ddof=0)。
+
+    肥尾(Student-t df=4):觀測 min 已 <−3σ → fill=觀測 min=行為與修前一致;
+    薄尾(uniform 正漂移):觀測 min >−3σ → fill 收緊為 −3σ。"""
+    # 肥尾:fill = 觀測 min
+    rng = np.random.default_rng(42)
+    r = 0.0022 + 0.0075 * rng.standard_t(4, 400)
+    vals = r.tolist()
+    for i in rng.choice(400, 8, replace=False):
+        vals[int(i)] = None
+    kept = np.array([v for v in vals if v is not None], dtype=float)
+    assert float(kept.min()) < -3.0 * kept.std(ddof=0)     # 前提:肥尾觀測 min 更深
+    ms = _run_returns(vals)["missing_sensitivity"]
+    assert ms["fill_value"] == pytest.approx(float(kept.min()))
+    # 薄尾:fill = −3σ
+    rng = np.random.default_rng(7)
+    r2 = rng.uniform(-0.004, 0.012, 400)
+    vals2 = r2.tolist()
+    for i in rng.choice(400, 10, replace=False):
+        vals2[int(i)] = None
+    kept2 = np.array([v for v in vals2 if v is not None], dtype=float)
+    assert float(kept2.min()) > -3.0 * kept2.std(ddof=0)   # 前提:薄尾觀測 min 較淺
+    ms2 = _run_returns(vals2)["missing_sensitivity"]
+    assert ms2["fill_value"] == pytest.approx(-3.0 * kept2.std(ddof=0))
+
+
+def test_fat_tail_honest_edge_unaffected_by_r23():
+    """肥尾誠實強 edge + 2% MCAR:觀測 min<−3σ → fill 不變(=修前行為),不誤傷。"""
+    rng = np.random.default_rng(42)
+    r = 0.0022 + 0.0075 * rng.standard_t(4, 400)
+    vals = r.tolist()
+    for i in rng.choice(400, 8, replace=False):
+        vals[int(i)] = None
+    out = _run_returns(vals)
+    assert out["verdict"]["overall"] == "likely-real"
+    ms = out["missing_sensitivity"]
+    assert ms["unstable"] is False
+    assert "missing_sensitivity_downgrade" not in _codes(out["verdict"]["reasons_coded"])
+
+
+def test_missing_downgrade_cost_table_documented():
+    """誤傷率(誠實 edge 因缺值敏感度被降級的代價)文件測試——R22 quant LOW。
+
+    量測設計照 quant(固定 seed、引擎確定性 → 數字精確可重現;斷言用區間而非
+    單點,容許未來校準微調但擋住量級漂移)。R23 實測(30 seed/格):
+      - 強 edge(漂移 0.0017,樣本年化夏普 ~2.5)+ 2% MCAR:12/30 = 40%(修前 30%)
+      - 強 edge + 3% MCAR:21/30 = 70%(修前 57%)
+      - 邊界 edge(漂移 0.0011,DSR 貼著 0.95)+ 3% MCAR:20/21 = 95%(修前同 95%)
+    這是 fail-closed 的明碼代價:缺值越多、edge 越邊界,越常被誠實降級——
+    「補齊資料再驗」是設計立場,不是 bug。數字同步揭露於 docs/INTEGRITY_MATRIX.md
+    (兩邊一起改才允許動本測試的區間)。"""
+    def cell(drift, n_miss, seeds):
+        base_lr, injured = 0, 0
+        for seed in seeds:
+            rng = np.random.default_rng(seed)
+            r = drift + 0.0105 * rng.standard_normal(400)
+            if _run_returns(r.tolist())["verdict"]["overall"] != "likely-real":
+                continue
+            base_lr += 1
+            vals = r.tolist()
+            for i in rng.choice(400, n_miss, replace=False):
+                vals[int(i)] = None
+            out = _run_returns(vals)
+            ms = out.get("missing_sensitivity") or {}
+            if out["verdict"]["overall"] != "likely-real" and ms.get("unstable"):
+                injured += 1
+        return base_lr, injured
+
+    b1, i1 = cell(0.0017, 8, range(100, 130))    # 強 edge、2% MCAR
+    b2, i2 = cell(0.0017, 12, range(100, 130))   # 強 edge、3% MCAR
+    b3, i3 = cell(0.0011, 12, range(200, 230))   # 邊界 edge、3% MCAR
+    assert b1 >= 20 and b2 >= 20 and b3 >= 15    # 分母有意義(基準 likely-real 夠多)
+    assert 0.25 <= i1 / b1 <= 0.55, f"強 edge 2% 誤傷率漂移:{i1}/{b1}"
+    assert 0.55 <= i2 / b2 <= 0.85, f"強 edge 3% 誤傷率漂移:{i2}/{b2}"
+    assert 0.85 <= i3 / b3 <= 1.00, f"邊界 edge 3% 誤傷率漂移:{i3}/{b3}"

@@ -6,11 +6,13 @@
 
 測試錨點:`engine/test_r17.py`、`engine/test_r19.py`、`engine/test_r21.py`、`engine/test_engine.py`、`engine/test_detect_convert.py`(pytest);`tools/verify_missing.node.js`、`tools/verify_integrity.node.js`、`tools/verify_align.node.js`(前端路徑 node 真值)。
 
+**R23 缺值敏感度校準成本(false-positive downgrade cost)**:敏感度補入值收緊為 `min(observed_min, -3 * sigma_obs)`，其中 `sigma_obs` 是剔除缺值後觀測報酬的母體標準差(`ddof=0`)。這代表「缺值若集中在 3σ 級壞日」的壓力情境；它不是缺失值估計，也無法代表更深的黑天鵝。固定 seed、每格 30 組的可重現量測顯示，原本會判 likely-real 的誠實 edge 因敏感度而降級的誤傷率為：強 edge + 2% MCAR `12/30 = 40%`；強 edge + 3% MCAR `21/30 = 70%`；邊界 edge + 3% MCAR 的 30 組中只有 21 組原本為 likely-real，當中 `20/21 = 95%` 被降級。這是 fail-closed 的明碼代價：缺值越多、edge 越靠近門檻，越需要補齊真實資料再驗。
+
 ## returns(單一報酬序列)
 
 | 異常 | 政策 | 測試 |
 |---|---|---|
-| 缺值 NaN/null <5% | 整期剔除 + 警語 `missing_values_dropped`(dates 同步)。**R21 加敏感度 fail-closed**:被剔除期真實報酬不可驗證 → 以「缺值集中在極端虧損日」情境(觀測最差單期報酬補入;p5 實測打不破 0.95 支柱=規則形同虛設,故用 min)重算夏普/DSR 併入警語;跌破雜訊地板(0.60)或高信心地板(0.95,判決倚賴的 DSR 支柱)且原判決為 likely-real → 降級 inconclusive(`missing_sensitivity_downgrade`);其餘只揭露不降級 | `test_r17.py::test_missing_small_dropped_matches_hand_cleaned`;`test_r21.py::test_missing_scam_downgraded_not_likely_real`、`::test_missing_sensitivity_honest_strong_edge_survives`、`::test_no_missing_clean_path_unchanged`;`verify_missing` 情境2 |
+| 缺值 NaN/null <5% | 整期剔除 + 警語 `missing_values_dropped`(dates 同步)。**R21/R23 敏感度 fail-closed**:被剔除期真實報酬不可驗證 → 以 `min(observed_min, -3 * sigma_obs)` 補入，模擬缺值集中在 3σ 級極端虧損日後重算夏普/DSR；跌破雜訊地板(0.60)或高信心地板(0.95,判決倚賴的 DSR 支柱)且原判決為 likely-real → 降級 inconclusive(`missing_sensitivity_downgrade`)，其餘只揭露不降級。p5 實測打不破 0.95 支柱；只用 observed min 又會被薄尾平滑收租序列打穿，故 R23 收緊。壓力情境與誤傷成本如上，不代表更深黑天鵝 | `test_r17.py::test_missing_small_dropped_matches_hand_cleaned`;`test_r21.py::test_missing_scam_downgraded_not_likely_real`、`::test_bounded_scam_downgraded_r23`、`::test_fill_value_is_min_of_obs_min_and_minus_3_sigma`、`::test_fat_tail_honest_edge_unaffected_by_r23`、`::test_missing_downgrade_cost_table_documented`;`verify_missing` 情境2 |
 | 缺值 ≥5% | 結構化拒審 `missing_values_reject` | `test_r17.py::test_missing_scam_rejected_returns_mode`;`verify_missing` 情境1 |
 | ±inf | 視同缺值(`isfinite` 判準),走上兩格 | `test_r19.py::test_inf_treated_as_missing` |
 | 非數字型別(字串等) | 結構化拒審 `invalid_values_type`(不裸例外);前端 `parseNumberCell` 先轉 NaN 走缺值通道 | `test_r19.py::test_invalid_values_type_structured_reject` |
@@ -33,7 +35,7 @@
 |---|---|---|
 | 任一欄缺值 ≥5% | 拒審 `missing_values_reject`(帶欄名) | `test_r17.py::test_missing_matrix_column_reject_names_column`;`verify_missing` 情境3 |
 | 各欄 <5% 但含缺格列合計 ≥5% | 拒審 `missing_rows_reject` | `test_r17.py::test_missing_matrix_union_rate_rejects`;`verify_missing` 情境5 |
-| 缺格列合計 <5% | 整列剔除(橫斷面對齊)+ `missing_rows_dropped`。**R21 加贏家欄敏感度 fail-closed**(同 returns 格政策):被剔列中贏家欄自己有值者用真實值補(已知就用已知)、贏家欄自身缺值才補觀測 min;跌破 0.60/0.95 且原判 likely-real → 降級 | `test_r17.py::test_missing_matrix_rows_dropped_keeps_alignment`;`test_r21.py::test_missing_sensitivity_matrix_winner_uses_known_values`;`verify_missing` 情境4 |
+| 缺格列合計 <5% | 整列剔除(橫斷面對齊)+ `missing_rows_dropped`。**R21/R23 贏家欄敏感度 fail-closed**(同 returns 格政策):被剔列中贏家欄自己有值者用真實值補(已知就用已知)，贏家欄自身缺值才以 `min(observed_min, -3 * sigma_obs)` 補入；跌破 0.60/0.95 且原判 likely-real → 降級。3σ 情境、誤傷成本與黑天鵝邊界同上 | `test_r17.py::test_missing_matrix_rows_dropped_keeps_alignment`;`test_r21.py::test_missing_sensitivity_matrix_winner_uses_known_values`;`verify_missing` 情境4 |
 | 欄名重複 | 前端:後欄改名 `名稱(2)` 保留 + `pw_dup_colname`(修前後欄**靜默覆蓋**前欄) | `verify_integrity` 情境7 |
 | 欄名重複(引擎端) | **未防禦(結構上不可見)**——matrix 以 JSON 物件/Python dict 傳遞,鍵唯一性在解析層已強制(後鍵勝),引擎收到時重複已消失;防線只能在前端(已設) | 誠實聲明 |
 | 非數字型別 | 拒審 `invalid_values_type` | `test_r19.py::test_invalid_values_type_structured_reject` |

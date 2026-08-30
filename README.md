@@ -41,7 +41,7 @@
 
 ### 1. Python 統計引擎 → 瀏覽器內執行(Pyodide / WebAssembly)
 
-裁判引擎(`engine/judge_web.py`,約 1,800 行)是純 Python + numpy/pandas,透過 [Pyodide](https://pyodide.org) 編譯成 WASM 在瀏覽器內跑。同一份引擎程式碼在 CPython 下直接 `pytest`(137 個測試,其中數支專門對帳本 README 的數字與校準宣稱、漂移即紅),前端只是把它注入 Pyodide——**測試環境與生產環境是同一份程式碼**,不存在「JS 重寫一遍然後兩邊算不一樣」的問題。
+裁判引擎(`engine/judge_web.py`,約 1,800 行)是純 Python + numpy/pandas,透過 [Pyodide](https://pyodide.org) 編譯成 WASM 在瀏覽器內跑。同一份引擎程式碼在 CPython 下直接 `pytest`(142 個測試,其中數支專門對帳本 README 的數字與校準宣稱、漂移即紅),前端只是把它注入 Pyodide——**測試環境與生產環境是同一份程式碼**,不存在「JS 重寫一遍然後兩邊算不一樣」的問題。
 
 ### 2. 沒有 scipy 怎麼辦:純 numpy 的 `statshim`
 
