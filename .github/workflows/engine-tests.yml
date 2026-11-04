@@ -20,7 +20,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install deps
-        run: pip install numpy pandas scipy pytest
+        run: pip install numpy pandas scipy statsmodels arch pytest
       - name: Run engine tests (fast layer)
         run: pytest engine -m "not slow" -q
 
@@ -49,6 +49,6 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install deps
-        run: pip install numpy pandas scipy pytest
+        run: pip install numpy pandas scipy statsmodels arch pytest
       - name: Run engine tests (full, incl. slow adversarial grid scans)
         run: pytest engine -q

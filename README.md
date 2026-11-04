@@ -41,11 +41,11 @@
 
 ### 1. Python 統計引擎 → 瀏覽器內執行(Pyodide / WebAssembly)
 
-裁判引擎(`engine/judge_web.py`,約 1,800 行)是純 Python + numpy/pandas,透過 [Pyodide](https://pyodide.org) 編譯成 WASM 在瀏覽器內跑。同一份引擎程式碼在 CPython 下直接 `pytest`(142 個測試,其中數支專門對帳本 README 的數字與校準宣稱、漂移即紅),前端只是把它注入 Pyodide——**測試環境與生產環境是同一份程式碼**,不存在「JS 重寫一遍然後兩邊算不一樣」的問題。
+裁判引擎(`engine/judge_web.py`,約 1,800 行)是純 Python + numpy/pandas,透過 [Pyodide](https://pyodide.org) 編譯成 WASM 在瀏覽器內跑。同一份引擎程式碼在 CPython 下直接 `pytest`(168 個測試,其中數支專門對帳本 README 的數字與校準宣稱、漂移即紅),前端只是把它注入 Pyodide——**測試環境與生產環境是同一份程式碼**,不存在「JS 重寫一遍然後兩邊算不一樣」的問題。
 
 ### 2. 沒有 scipy 怎麼辦:純 numpy 的 `statshim`
 
-DSR 需要常態分布的 CDF/PPF、偏度、峰度——通常這是 `scipy.stats` 的活,但 scipy 在 Pyodide 裡是幾十 MB 的負擔。解法是 `engine/statshim.py`:用 stdlib 的 `math.erf` 實作 `norm_cdf`,用 Acklam 有理逼近 + Halley 修正實作 `norm_ppf`(對照 scipy 誤差 < 1e-9),偏度/峰度手算動差、對齊 scipy 的預設行為。129 行換掉整個 scipy 依賴。
+DSR 需要常態分布的 CDF/PPF、偏度、峰度——通常這是 `scipy.stats` 的活,但 scipy 在 Pyodide 裡是幾十 MB 的負擔。解法是 `engine/statshim.py`:用 stdlib 的 `math.erfc` 實作 `norm_cdf`(左尾保有相對精度),用 Acklam 有理逼近 + Halley 修正實作 `norm_ppf`(對照 scipy 誤差 < 1e-9),偏度/峰度手算動差、對齊 scipy 的預設行為。155 行換掉整個 scipy 依賴(另有 [scipy/statsmodels/arch 參考實作逐項交叉比對](docs/reference-check.md))。
 
 ### 3. 雜訊硬化 + fail-closed:裁判不能被「幸運的雜訊」騙過
 
@@ -127,7 +127,7 @@ Architecture highlights:
 
 - **Zero backend.** The full Python/numpy referee engine runs *inside your browser* via Pyodide (WASM). Your CSV never leaves your machine.
 - **Same code in test and prod.** The engine is plain Python, unit-tested under CPython with pytest, and injected verbatim into Pyodide — no JS reimplementation drift.
-- **No scipy needed.** A 129-line pure-numpy `statshim` replaces scipy.stats (norm CDF via `math.erf`, PPF via Acklam's approximation + Halley refinement, |err| < 1e-9).
+- **No scipy needed.** A 155-line pure-numpy `statshim` replaces scipy.stats (norm CDF via `math.erfc`, PPF via Acklam's approximation + Halley refinement, |err| < 1e-9).
 - **Fail-closed by design.** When escalated noise-hardening still can't rule out overfitting (capped-escape), the referee refuses to call "likely real." Missing cells are never zero-filled and duplicate timestamps are never silently deduped — at ≥5% either way, it refuses to judge (others fill zeros; this one refuses). The full input-channel × anomaly policy table lives in [docs/INTEGRITY_MATRIX.md](docs/INTEGRITY_MATRIX.md). When in doubt, it does not pass you.
 - **Born from 4,800+ strategy trials with 0 honest out-of-sample survivors.** This tool is the referee system distilled from that farm — built to stop you before you fund an overfit backtest. How that number is accounted for, the kill pipeline, and the honest limits of the claim itself: see the [trial graveyard](docs/trial-graveyard.md) (English summary at the bottom).
 

@@ -17,6 +17,7 @@
 | ±inf | 視同缺值(`isfinite` 判準),走上兩格 | `test_r19.py::test_inf_treated_as_missing` |
 | 非數字型別(字串等) | 結構化拒審 `invalid_values_type`(不裸例外);前端 `parseNumberCell` 先轉 NaN 走缺值通道 | `test_r19.py::test_invalid_values_type_structured_reject` |
 | 空序列 | 結構化拒審 `returns_empty` | `test_engine.py::test_warnings_coded_paths`、`::test_empty_and_short_inputs` |
+| 常數/零波動序列(std ≤ 1e-9×\|mean\|,含只差浮點捨入) | 結構化拒審 `zero_variance_reject`(matrix 模式作用於挑出的贏家欄)。舊版浮點雜訊 std≈1e-19 → 夏普 ~1e16 → likely-real 86 分;估計量層(`_sharpe_periodic`/`deflated_sharpe`/`compute_metrics`/statshim 動差)同一門檻回 0/NaN/常態值。見 [reference-check](reference-check.md) | `test_reference_check.py::test_analyze_rejects_constant_returns`、`::test_reference[check_degenerate_constant]` |
 | 極端值 \|r\|≥10(=1000%) | 警語 `extreme_returns`(多為百分比誤當小數;不拒審——可能是真極端事件);cagr 冪運算 Overflow 已夾 inf 不裸崩 | `test_r19.py::test_extreme_returns_unit_error_warned`、`::test_zero_crossing_nav_survives_as_returns_without_crash` |
 | 負值/零 | 合法(報酬本可負可零),不動 | —(定義即政策) |
 | 值重複(無日期) | **未防禦**——合法報酬本可重複,無日期時「複製列」與「巧合同值」數學上不可分;有日期時由 dates 通道攔截 | 誠實聲明 |

@@ -1,9 +1,10 @@
 """statshim — 純 numpy/stdlib 取代 scipy.stats(只取本引擎用到的幾個)。
 
 引擎要在瀏覽器 Pyodide 內跑,不能扛 scipy。這裡自備:
-- norm_cdf : 標準常態 CDF,用 math.erf(stdlib) 逼近,精度 ~機器精度。
+- norm_cdf : 標準常態 CDF,用 math.erfc(stdlib),兩尾皆 ~機器精度(左尾為相對精度)。
 - norm_ppf : 標準常態逆 CDF(quantile),Acklam 的 rational 逼近 + 一步 Halley 修正,
-             |誤差| < 1e-9(對照 scipy.stats.norm.ppf 已驗)。
+             |誤差| < 1e-9(對照 scipy.stats.norm.ppf 已驗,p 低至 1e-300;
+             次正規數 p 不丟例外。見 engine/reference_check.py)。
 - skew     : 樣本偏度(母體/有偏估計,mean-based 三階動差),對齊 scipy.stats.skew 預設(bias=True)。
 - kurtosis : 樣本峰度,非超額(normal=3),對齊 scipy.stats.kurtosis(fisher=False, bias=True)。
 
@@ -23,10 +24,13 @@ _SQRT2 = math.sqrt(2.0)
 def norm_cdf(x):
     """標準常態 CDF Φ(x)。純量或 array 皆可。用 erf: Φ(x)=½(1+erf(x/√2))。"""
     arr = np.asarray(x, dtype=float)
+    # ★reference-check 修正★:舊式 ½(1+erf(x/√2)) 在左尾有災難性抵銷——x=-8 相對誤差 2%,
+    #   x≤-8.3 直接變 0(scipy: Φ(-10)=7.6e-24)。改用互補誤差函數 Φ(x)=½·erfc(-x/√2),
+    #   左尾保有完整相對精度、右尾絕對誤差不變。
     if arr.ndim == 0:
-        return 0.5 * (1.0 + math.erf(float(arr) / _SQRT2))
-    vec = np.vectorize(math.erf, otypes=[float])
-    return 0.5 * (1.0 + vec(arr / _SQRT2))
+        return 0.5 * math.erfc(-float(arr) / _SQRT2)
+    vec = np.vectorize(math.erfc, otypes=[float])
+    return 0.5 * vec(-arr / _SQRT2)
 
 
 # Acklam(2003)逆常態 CDF 的 rational 逼近係數
@@ -49,6 +53,15 @@ def _ppf_scalar(p):
         if p == 1.0:
             return math.inf
         return math.nan
+    # ★reference-check 修正★:上半部以對稱 Φ⁻¹(p)=-Φ⁻¹(1-p) 轉到下尾(p∈[½,1) 時 1-p 精確),
+    #   只在下尾做 Halley 修正,讓修正步的 Φ(x) 有完整相對精度。
+    if p > 0.5:
+        return -_ppf_lower(1.0 - p)
+    return _ppf_lower(p)
+
+
+def _ppf_lower(p):
+    """0 < p ≤ 0.5 的 Φ⁻¹(p)。"""
     if p < _P_LOW:
         q = math.sqrt(-2.0 * math.log(p))
         x = (((((_C[0] * q + _C[1]) * q + _C[2]) * q + _C[3]) * q + _C[4]) * q + _C[5]) / \
@@ -62,9 +75,12 @@ def _ppf_scalar(p):
         q = math.sqrt(-2.0 * math.log(1.0 - p))
         x = -(((((_C[0] * q + _C[1]) * q + _C[2]) * q + _C[3]) * q + _C[4]) * q + _C[5]) / \
             ((((_D[0] * q + _D[1]) * q + _D[2]) * q + _D[3]) * q + 1.0)
-    # 一步 Halley 修正把精度拉到 ~1e-15
-    e = norm_cdf(x) - p
-    u = e * math.sqrt(2.0 * math.pi) * math.exp(x * x / 2.0)
+    # 一步 Halley 修正把精度拉到 ~1e-15。
+    # ★reference-check 修正★:舊式 u=e·√(2π)·exp(x²/2) 在 p<~1e-308(x<-37.6)時 exp 溢位
+    #   丟 OverflowError,且 e=Φ(x)-p 依賴左尾已抵銷的 Φ → p=1e-17 時誤差 0.08。
+    #   改寫成等價的 u=(Φ(x)/p-1)·√(2π)·exp(ln p + x²/2):指數項有界、Φ(x)/p 相對精確。
+    c = norm_cdf(x)
+    u = (c / p - 1.0) * math.sqrt(2.0 * math.pi) * math.exp(math.log(p) + x * x / 2.0)
     x = x - u / (1.0 + x * u / 2.0)
     return x
 
@@ -79,7 +95,17 @@ def norm_ppf(p):
 
 
 # ---------------------------------------------------------------------------
-# 動差:偏度 / 峰度(對齊 scipy 預設 bias=True）
+# 動差:偏度 / 峰度
+#   ★reference-check 修正★:近常數序列(如 [0.01]*10)的 m2 不是 0 而是 ~1e-36 的浮點
+#   捨入雜訊,舊版 m2==0 判斷漏接 → 偏度/峰度變成雜訊比值(任意大數)。改與 judge_web
+#   同一退化門檻:std ≤ 1e-9·|mean| 視為無波動,回常態值(偏度 0、峰度 3)。
+#   (scipy 此時回 NaN 並警告「catastrophic cancellation」——刻意分歧,已文件化。)
+# ---------------------------------------------------------------------------
+def _degenerate(m2, mean):
+    return (not m2 > 0) or math.sqrt(m2) <= 1e-9 * abs(mean)
+
+
+# ---------------------------------------------------------------------------(對齊 scipy 預設 bias=True）
 # ---------------------------------------------------------------------------
 def skew(a):
     """樣本偏度(有偏,mean-based)。對齊 scipy.stats.skew(a, bias=True)。"""
@@ -91,7 +117,7 @@ def skew(a):
     d = x - m
     m2 = np.mean(d ** 2)
     m3 = np.mean(d ** 3)
-    if m2 == 0:
+    if _degenerate(m2, m):
         return 0.0
     return float(m3 / m2 ** 1.5)
 
@@ -107,7 +133,7 @@ def kurtosis(a, fisher=False):
     d = x - m
     m2 = np.mean(d ** 2)
     m4 = np.mean(d ** 4)
-    if m2 == 0:
+    if _degenerate(m2, m):
         return 0.0 if fisher else 3.0
     k = m4 / m2 ** 2
     return float(k - 3.0) if fisher else float(k)
