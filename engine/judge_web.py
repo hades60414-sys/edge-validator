@@ -21,6 +21,17 @@ from . import statshim as ss
 EULER_GAMMA = 0.5772156649015329
 _SE_FLOOR = 1e-12
 
+# ★reference-check 修正:退化波動守衛★
+#   常數報酬序列(例:每期 +0.1%)的 std 在浮點下不是 0 而是 ~1e-19 的捨入雜訊 →
+#   夏普 ~1e16、DSR=1.0、analyze 判 likely-real 86 分(fail-open)。std ≤ 此相對門檻×|mean|
+#   (等價於每期 |夏普| ≥ 1e9,任何真實回測都不可能)一律視為「無可量測波動」。
+_DEGEN_SD_REL = 1e-9
+
+
+def _is_degenerate_sd(sd: float, mean: float) -> bool:
+    """std 為 0 或只剩浮點捨入雜訊(≤ 1e-9×|mean|)→ True。"""
+    return (not sd > 0) or sd <= _DEGEN_SD_REL * abs(mean)
+
 # ★R17 必修1:缺值 fail-closed 門檻★
 #   空白/非數值格以 0 填補會人為壓低波動、抬高夏普(把最差的日子留空即可騙分)。
 #   本引擎【絕不填 0】:缺格率 < 門檻 → 整期剔除並告警揭露;≥ 門檻 → 結構化拒審。
@@ -64,10 +75,12 @@ def compute_metrics(returns, periods_per_year: float) -> dict:
 
     mean = r.mean() * apy if n else 0.0
     vol = r.std(ddof=0) * np.sqrt(apy) if n else 0.0
-    sharpe = float(mean / vol) if vol > 0 else float("nan")
+    sharpe = float(mean / vol) if (n and not _is_degenerate_sd(vol, mean)) else float("nan")
 
-    neg = r[r < 0]
-    downside = neg.std(ddof=0) * np.sqrt(apy) if neg.size else 0.0
+    # ★reference-check 修正★:Sortino 下方偏差改回 Sortino & Price (1994) 定義
+    #   √(mean(min(r,0)²)),對【全部】期數平均、目標報酬 0。舊式 std(負報酬子集) 會把負報酬
+    #   去均值——負報酬全相同時分母=0(Sortino=NaN)、只有一筆負報酬時亦為 0,且系統性低估下方風險。
+    downside = float(np.sqrt(np.mean(np.minimum(r, 0.0) ** 2)) * np.sqrt(apy)) if n else 0.0
     sortino = float(mean / downside) if downside > 0 else float("nan")
 
     mdd = _max_drawdown(eq)
@@ -89,7 +102,8 @@ def _sharpe_periodic(r: np.ndarray) -> float:
     if r.size == 0:
         return 0.0
     std = r.std(ddof=0)
-    return float(r.mean() / std) if std > 0 else 0.0
+    mean = r.mean()
+    return 0.0 if _is_degenerate_sd(std, mean) else float(mean / std)
 
 
 # ===========================================================================
@@ -100,19 +114,27 @@ def expected_max_sharpe(sr_variance: float, n_trials: int) -> float:
     if n_trials < 2:
         return 0.0
     sd = float(np.sqrt(max(sr_variance, 0.0)))
-    z1 = ss.norm_ppf(1.0 - 1.0 / n_trials)
-    z2 = ss.norm_ppf(1.0 - 1.0 / (n_trials * np.e))
+    # ★reference-check 修正★:Φ⁻¹(1-1/N) 改寫成 -Φ⁻¹(1/N)(=scipy norm.isf)。1-1/N 在大 N
+    #   下有捨入(N=1e12 相對誤差 1.3e-6、N=1e15 誤差 0.007),1/N 則精確。
+    z1 = -ss.norm_ppf(1.0 / n_trials)
+    z2 = -ss.norm_ppf(1.0 / (n_trials * np.e))
     return sd * ((1.0 - EULER_GAMMA) * z1 + EULER_GAMMA * z2)
+
+
+def _psr_z(sr_hat: float, sr_benchmark: float, n_obs: int,
+           skew: float, kurt: float) -> float:
+    """PSR 的標準化統計量 z(PSR=Φ(z))。分母非有限或 0 → NaN。"""
+    denom = np.sqrt(1.0 - skew * sr_hat + (kurt - 1.0) / 4.0 * sr_hat ** 2)
+    if not np.isfinite(denom) or denom == 0:
+        return float("nan")
+    return float((sr_hat - sr_benchmark) * np.sqrt(max(n_obs - 1, 1)) / denom)
 
 
 def probabilistic_sharpe(sr_hat: float, sr_benchmark: float, n_obs: int,
                          skew: float, kurt: float) -> float:
     """PSR:給定非常態報酬,P(真 SR > sr_benchmark)。kurt 為非超額(normal=3)。"""
-    denom = np.sqrt(1.0 - skew * sr_hat + (kurt - 1.0) / 4.0 * sr_hat ** 2)
-    if not np.isfinite(denom) or denom == 0:
-        return float("nan")
-    z = (sr_hat - sr_benchmark) * np.sqrt(max(n_obs - 1, 1)) / denom
-    return float(ss.norm_cdf(z))
+    z = _psr_z(sr_hat, sr_benchmark, n_obs, skew, kurt)
+    return float(ss.norm_cdf(z)) if z == z else float("nan")
 
 
 def deflated_sharpe(returns: np.ndarray, n_trials: int,
@@ -131,7 +153,8 @@ def deflated_sharpe(returns: np.ndarray, n_trials: int,
     r = np.asarray(returns, dtype=float)
     r = r[np.isfinite(r)]
     std = r.std(ddof=1) if r.size > 1 else 0.0
-    sr = float(r.mean() / std) if std > 0 else 0.0
+    degenerate = _is_degenerate_sd(std, r.mean() if r.size else 0.0)
+    sr = 0.0 if degenerate else float(r.mean() / std)
     pool = np.asarray(trial_sharpes, dtype=float)
     pool = pool[np.isfinite(pool)]
     variance_proxy = False
@@ -144,13 +167,15 @@ def deflated_sharpe(returns: np.ndarray, n_trials: int,
     else:
         sr_variance = 0.0
     sr0 = expected_max_sharpe(sr_variance, n_trials)
-    dsr = probabilistic_sharpe(
+    z = _psr_z(
         sr_hat=sr, sr_benchmark=sr0, n_obs=r.size,
-        skew=ss.skew(r) if r.size > 2 else 0.0,
-        kurt=ss.kurtosis(r, fisher=False) if r.size > 2 else 3.0,
+        skew=ss.skew(r) if (r.size > 2 and not degenerate) else 0.0,
+        kurt=ss.kurtosis(r, fisher=False) if (r.size > 2 and not degenerate) else 3.0,
     )
+    dsr = float(ss.norm_cdf(z)) if z == z else float("nan")
+    # ★reference-check 修正★:p 值直接取上尾 Φ(-z),不用 1-DSR(DSR→1 時抵銷成 0)。
     return {"sr_daily": sr, "sr0_daily": sr0, "dsr": dsr,
-            "p_value": (1.0 - dsr) if np.isfinite(dsr) else float("nan"),
+            "p_value": float(ss.norm_cdf(-z)) if z == z else float("nan"),
             "n_trials": int(n_trials), "sr_variance_proxy": variance_proxy}
 
 
@@ -324,11 +349,11 @@ def _block_moments(values: np.ndarray, n_blocks: int):
     return sums, sumsqs, counts
 
 
-def _sharpe_from_moments(s, ss_, n):
+def _sharpe_from_moments(s, ss_, n, shift=0.0):
     mean = s / n
     var = ss_ / n - mean ** 2
     sd = np.sqrt(np.clip(var, 1e-18, None))
-    return mean / sd
+    return (mean + shift) / sd
 
 
 def pbo_cscv(values: np.ndarray, n_blocks: int = 12) -> dict:
@@ -342,7 +367,10 @@ def pbo_cscv(values: np.ndarray, n_blocks: int = 12) -> dict:
     if n_blocks < 2:
         return {"pbo": float("nan"), "n_combinations": 0, "n_strategies": int(values.shape[1])}
     n_strategies = values.shape[1]
-    sums, sumsqs, counts = _block_moments(values, n_blocks)
+    # ★reference-check 修正★:先扣各欄全樣本均值再累積動差(變異數平移不變),避免
+    #   「Σx²/n − mean²」在大位移資料上的災難性抵銷;夏普時再把位移加回均值。
+    shift = values.mean(axis=0)
+    sums, sumsqs, counts = _block_moments(values - shift, n_blocks)
     is_idx = np.array(list(combinations(range(n_blocks), n_blocks // 2)))
     mask = np.zeros((len(is_idx), n_blocks), dtype=bool)
     mask[np.arange(len(is_idx))[:, None], is_idx] = True
@@ -350,17 +378,20 @@ def pbo_cscv(values: np.ndarray, n_blocks: int = 12) -> dict:
     sr_is = _sharpe_from_moments(
         np.add.reduce(sums[is_idx], axis=1),
         np.add.reduce(sumsqs[is_idx], axis=1),
-        np.add.reduce(counts[is_idx], axis=1))
+        np.add.reduce(counts[is_idx], axis=1), shift)
     sr_oos = _sharpe_from_moments(
         np.add.reduce(sums[oos_idx], axis=1),
         np.add.reduce(sumsqs[oos_idx], axis=1),
-        np.add.reduce(counts[oos_idx], axis=1))
+        np.add.reduce(counts[oos_idx], axis=1), shift)
     best = np.argmax(sr_is, axis=1)
     best_oos = sr_oos[np.arange(len(is_idx)), best]
     omega = (sr_oos <= best_oos[:, None]).sum(axis=1) / (n_strategies + 1)
     omega = np.clip(omega, 1e-9, 1 - 1e-9)
     logits = np.log(omega / (1 - omega))
-    return {"pbo": float(np.mean(logits < 0)), "n_combinations": int(len(logits)),
+    # ★reference-check 修正★:PBO = ∫_{-∞}^{0} f(λ)dλ(Bailey et al. 2017)——λ=0(IS 冠軍 OOS
+    #   恰落在中位數,N 為奇數時才會發生)也算過擬合。舊式 λ<0 在奇數 N 下系統性低估
+    #   (N=3 時漏掉整個中位數名次),與本引擎 fail-closed 哲學相反。
+    return {"pbo": float(np.mean(logits <= 0)), "n_combinations": int(len(logits)),
             "n_strategies": n_strategies, "n_blocks": n_blocks}
 
 
@@ -452,22 +483,29 @@ def permutation_null(returns: np.ndarray, periods_per_year: float,
     L = int(block_len) if block_len else int(max(1, round(np.sqrt(T))))
     L = max(1, min(L, T))
     m = int(np.ceil(T / L))
+    rem = T - (m - 1) * L
     ext = np.concatenate([dm, dm[:L - 1]]) if L > 1 else dm
     c = np.concatenate([[0.0], np.cumsum(ext)])
     csq = np.concatenate([[0.0], np.cumsum(ext ** 2)])
     sum_l = c[L:L + T] - c[:T]
     sumsq_l = csq[L:L + T] - csq[:T]
+    sum_r = c[rem:rem + T] - c[:T]
+    sumsq_r = csq[rem:rem + T] - csq[:T]
+    # ★reference-check 修正(對照 scipy t 檢定:舊版 null p95 系統性偏低 3–6.5% = 反保守)★
+    #   (a) 重抽序列長度截到 T(最後一塊只取 rem 期),與 FWER 底座同慣例;舊版用 m·L>T 期,
+    #       null 分布偏瘦。(b) CBB 平均數變異的有限樣本下偏 E[Var*]≈(σ²/T)(1-L/T):
+    #       平均數乘 1/√(1-L/T) 校正(與 run_fwer_gates 的 spread_corr 同一校正)。
+    spread_corr = float(1.0 / np.sqrt(max(1.0 - L / T, 0.25)))
     rng = np.random.default_rng(seed)
     null = np.empty(n_perm, dtype=float)
     for i in range(n_perm):
         starts = rng.integers(0, T, size=m)
-        tot = float(sum_l[starts].sum())
-        totsq = float(sumsq_l[starts].sum())
-        nn = m * L
-        mean = tot / nn
-        var = totsq / nn - mean ** 2
+        tot = float(sum_l[starts[:m - 1]].sum() + sum_r[starts[m - 1]])
+        totsq = float(sumsq_l[starts[:m - 1]].sum() + sumsq_r[starts[m - 1]])
+        mean = tot / T
+        var = totsq / T - mean ** 2
         sd = np.sqrt(var) if var > 0 else 0.0
-        null[i] = (mean / sd) * np.sqrt(apy) if sd > 0 else 0.0
+        null[i] = (mean * spread_corr / sd) * np.sqrt(apy) if sd > 0 else 0.0
     p95 = float(np.percentile(null, 95))
     p_value = float((1 + int(np.sum(null >= real_sr))) / (n_perm + 1))
     return {"real_sharpe": float(real_sr), "null_p95_sharpe": p95,
@@ -1225,6 +1263,15 @@ def analyze(payload: dict) -> dict:
     ppy = _infer_ppy(dates, payload.get("periods_per_year"), warn=_warn)
 
     n = returns.size
+    # ★reference-check 修正:退化波動 fail-closed★
+    #   常數(或只差浮點捨入)的報酬序列沒有可量測的波動,夏普/DSR/permutation 全無定義;
+    #   舊版浮點雜訊 std≈1e-19 → 夏普 ~1e16 → likely-real 86 分。誠實拒審。
+    if n >= 2 and _is_degenerate_sd(float(returns.std(ddof=0)), float(returns.mean())):
+        return _missing_reject(
+            f"波動退化拒審:{'挑出的贏家欄' if mode == 'matrix' else '報酬序列'} {n} 期的報酬"
+            "全部相同(或只差浮點捨入),沒有可量測的波動——夏普、DSR、隨機重排檢定在此都"
+            "無定義,任何「顯著」都是數值假象。請確認上傳的是逐期報酬(而非常數/固定利率)後再試。",
+            "zero_variance_reject", n_periods=int(n), matrix=bool(mode == "matrix"))
     if n < 30:
         _warn(f"樣本僅 {n} 期,統計檢定力弱,結論僅供參考。", "short_sample", n=int(n))
 
